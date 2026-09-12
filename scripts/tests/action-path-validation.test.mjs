@@ -29,7 +29,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const ACTION_PATH = path.join(ROOT, 'action.yml');
+// Honours the same override as action-run-script.test.mjs. Without it, a
+// mutation run pointed the behavioural suite at a weakened copy while every
+// textual guard in THIS file kept reading the real action.yml and reporting
+// green, which is a false negative in exactly the situation the override
+// exists to investigate.
+const ACTION_PATH = process.env.DG_ACTION_FILE ?? path.join(ROOT, 'action.yml');
 const actionYml = readFileSync(ACTION_PATH, 'utf8');
 
 // The same shape action.yml uses. Kept in step with it by the textual

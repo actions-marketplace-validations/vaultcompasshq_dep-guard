@@ -232,9 +232,10 @@ steps:
       fail-on: high
 ```
 
-No `version` input in that example, because the default is the version the
-action shipped with: the tag you pin the action to is the version that scans
-the pull request.
+No `version` input in that example, because the default is the scanner version
+this action tag shipped with. Leaving it out is the recommended shape: the
+action tag then decides the scanner, and there is one pin to bump instead of
+two that can disagree.
 
 Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
 `fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own

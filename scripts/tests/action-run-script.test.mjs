@@ -89,9 +89,61 @@ function extractStepEnv(stepName) {
     if (lineIndent < indent) break;
     if (lineIndent > indent || line.trim().startsWith('#')) continue;
     const match = /^([A-Za-z_][A-Za-z0-9_]*):\s*(.*)$/.exec(line.trim());
-    if (match) env[match[1]] = match[2];
+    if (match) env[match[1]] = normaliseScalar(match[2]);
   }
   return env;
+}
+
+// The two ways this hand-rolled parser used to disagree with YAML, both found
+// by a review that fed it legal YAML the real file does not currently use.
+//
+// A trailing `# comment` is not part of the value. The parser kept it, and it
+// flowed into the scan argument, so the suite was testing a command GitHub
+// would never issue -- silently, because nothing asserted on it.
+//
+// A quoted scalar is not quoted once YAML has read it. The parser kept the
+// quotes, which turns a CORRECT action.yml red and invites the next person to
+// loosen the assertion instead of fixing the parser.
+//
+// This is a parser for the subset action.yml actually uses, not a YAML
+// implementation. It is deliberately strict about that subset and refuses to
+// guess: a value it cannot read unambiguously throws rather than degrading.
+function normaliseScalar(raw) {
+  let value = raw;
+  const quoted = /^(['"])(.*)\1\s*$/.exec(value.trim());
+  if (quoted) return quoted[2];
+  // A `#` only starts a comment when whitespace precedes it; `a#b` is a value.
+  const comment = /\s+#.*$/.exec(value);
+  if (comment) value = value.slice(0, comment.index);
+  return value.trim();
+}
+
+// The step's declared working directory, or '' when it declares none.
+//
+// DERIVED, not assumed. A harness that hardcodes the cwd it thinks a step uses
+// is asserting a property of itself: the isolation tests below would pass on an
+// action.yml that had lost `working-directory` entirely, which is precisely the
+// line that keeps npm from starting with the head's .npmrc under its cwd.
+function extractStepWorkingDirectory(stepName) {
+  const lines = actionYml.split('\n');
+  const stepAt = lines.findIndex((l) => l.trim() === `- name: ${stepName}`);
+  if (stepAt === -1) throw new Error(`no step named ${stepName} in action.yml`);
+  for (let i = stepAt + 1; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith('- name:')) break;
+    if (trimmed === 'run: |') break;
+    const match = /^working-directory:\s*(.*)$/.exec(trimmed);
+    if (match) return normaliseScalar(match[1]);
+  }
+  return '';
+}
+
+function cwdForStep(stepName, ctx) {
+  const declared = extractStepWorkingDirectory(stepName);
+  // No working-directory means the workspace root, which is the head's own
+  // tree. The default has to be the unsafe one: a harness that defaulted
+  // somewhere safe would report a step as isolated that is not.
+  return declared ? evaluateTemplate(declared, ctx) : ctx.workspace;
 }
 
 // The `${{ }}` expressions this action uses, and nothing else. Throwing on an
@@ -137,11 +189,12 @@ function makeRunner(inputs = {}) {
   mkdirSync(workspace, { recursive: true });
   mkdirSync(runnerTemp, { recursive: true });
 
-  const ctx = { inputs: { ...DEFAULT_INPUTS, ...inputs }, runnerTemp };
+  const ctx = { inputs: { ...DEFAULT_INPUTS, ...inputs }, runnerTemp, workspace };
   const env = evaluateStepEnv('Run dep-guard', ctx);
 
   const plantedRecord = path.join(dir, 'planted.txt');
   const npxRecord = path.join(dir, 'npx.txt');
+  const npmRecord = path.join(dir, 'npm.txt');
   mkdirSync(path.join(workspace, 'node_modules/.bin'), { recursive: true });
   writeFileSync(
     path.join(workspace, 'node_modules/.bin/dep-guard'),
@@ -158,7 +211,20 @@ function makeRunner(inputs = {}) {
   );
   chmodSync(path.join(pathDir, 'npx'), 0o755);
 
-  return { dir, workspace, runnerTemp, ctx, env, plantedRecord, npxRecord, pathDir };
+  // npm records its argv AND the directory it was started in. The second one
+  // is the point: npm started inside the checkout reads the head's .npmrc,
+  // package.json and lockfile, and no assertion about the run step can see
+  // that, because by then the install has already happened.
+  writeFileSync(
+    path.join(pathDir, 'npm'),
+    `#!/bin/sh\nprintf 'cwd=%s\\n' "$(pwd -P)" >> ${JSON.stringify(npmRecord)}\n` +
+      `printf 'argv=%s\\n' "$*" >> ${JSON.stringify(npmRecord)}\n` +
+      `printf 'prefix=%s\\n' "\${npm_config_prefix:-unset}" >> ${JSON.stringify(npmRecord)}\n` +
+      'exit 0\n'
+  );
+  chmodSync(path.join(pathDir, 'npm'), 0o755);
+
+  return { dir, workspace, runnerTemp, ctx, env, plantedRecord, npxRecord, npmRecord, pathDir };
 }
 
 function evaluateStepEnv(stepName, ctx) {
@@ -205,7 +271,7 @@ function argvFor(inputs = {}, extraEnv = {}) {
   execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptFile], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    cwd: runner.runnerTemp,
+    cwd: cwdForStep('Run dep-guard', runner.ctx),
     env: {
       PATH: `${path.join(runner.workspace, 'node_modules/.bin')}:${runner.pathDir}:${process.env.PATH ?? ''}`,
       GITHUB_WORKSPACE: runner.workspace,
@@ -235,7 +301,7 @@ function runStep(exitCode, extraEnv = {}, inputs = {}) {
     execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptFile], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
-      cwd: runner.runnerTemp,
+      cwd: cwdForStep('Run dep-guard', runner.ctx),
       env: {
         PATH: `${path.join(runner.workspace, 'node_modules/.bin')}:${runner.pathDir}:${process.env.PATH ?? ''}`,
         GITHUB_WORKSPACE: runner.workspace,
@@ -337,6 +403,84 @@ describe('action.yml "Run dep-guard", under GitHub bash flags', () => {
   });
 });
 
+// The install step, run for real with npm stubbed.
+//
+// This describe block exists because a review deleted the whole install step
+// from a copy of action.yml and every test still passed. The run-step tests
+// below are the WEAKER half of the boundary: they prove the scanner is called
+// by absolute path, but the harness plants the stub at that path itself, so
+// they hold whether or not anything ever installed it there. Where npm is
+// started, and with what prefix, is the half that keeps the head's .npmrc out
+// of the decision, and nothing was checking it.
+describe('action.yml "Install dep-guard outside the workspace"', () => {
+  function runInstall(inputs = {}) {
+    const runner = makeRunner(inputs);
+    const scriptFile = path.join(runner.dir, 'install.sh');
+    writeFileSync(scriptFile, extractRunScript('Install dep-guard outside the workspace'));
+    let status = 0;
+    try {
+      execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptFile], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: cwdForStep('Install dep-guard outside the workspace', runner.ctx),
+        env: {
+          PATH: `${path.join(runner.workspace, 'node_modules/.bin')}:${runner.pathDir}:${process.env.PATH ?? ''}`,
+          GITHUB_WORKSPACE: runner.workspace,
+          ...evaluateStepEnv('Install dep-guard outside the workspace', runner.ctx),
+        },
+      });
+    } catch (err) {
+      status = typeof err.status === 'number' ? err.status : -1;
+    }
+    const record = existsSync(runner.npmRecord) ? readFileSync(runner.npmRecord, 'utf8') : '';
+    return { runner, status, record };
+  }
+
+  test('installs the pinned version globally, and nothing else', () => {
+    const run = runInstall();
+    expect(run.status).toBe(0);
+    expect(run.record).toContain('argv=install -g @vaultcompass/dep-guard@0.6.0');
+  });
+
+  test('installs the version the input asked for, not a hardcoded one', () => {
+    expect(runInstall({ version: '0.5.0' }).record).toContain(
+      'argv=install -g @vaultcompass/dep-guard@0.5.0'
+    );
+  });
+
+  test('starts npm outside the checkout, so a committed .npmrc is never its cwd', () => {
+    // The head's .npmrc sits in the workspace. npm started there reads it and
+    // fetches from whatever registry it names. This is the assertion that
+    // makes the whole boundary real; everything else follows from it.
+    const run = runInstall();
+    const cwdLine = run.record.split('\n').find((l) => l.startsWith('cwd='));
+    expect(cwdLine).toBeDefined();
+    expect(cwdLine).toContain(path.basename(run.runner.runnerTemp));
+    expect(cwdLine).not.toContain(`${path.sep}workspace`);
+  });
+
+  test('installs under a prefix in the runner temp, not into the checkout', () => {
+    const run = runInstall();
+    const prefixLine = run.record.split('\n').find((l) => l.startsWith('prefix='));
+    expect(prefixLine).toBeDefined();
+    expect(prefixLine).not.toBe('prefix=unset');
+    expect(prefixLine).toContain(path.basename(run.runner.runnerTemp));
+    expect(prefixLine).not.toContain(`${path.sep}workspace`);
+  });
+
+  test('the binary the run step calls is the one this step installs', () => {
+    // The two steps agree by construction rather than by coincidence: the
+    // prefix here and DG_BIN there both derive from runner.temp, and a change
+    // to one that forgot the other would leave the run step calling a path
+    // nothing wrote.
+    const run = runInstall();
+    const prefix = (run.record.split('\n').find((l) => l.startsWith('prefix=')) ?? '').slice(
+      'prefix='.length
+    );
+    expect(run.runner.env.DG_BIN).toBe(path.join(prefix, 'bin', 'dep-guard'));
+  });
+});
+
 // The boundary the install step exists to draw, proven by what ran rather
 // than by reading the script.
 describe('action.yml runs the installed scanner and nothing else', () => {
@@ -375,6 +519,15 @@ describe('action.yml runs the installed scanner and nothing else', () => {
     const run = runStep(0);
     expect(run.scannerCwd).not.toBe('');
     expect(run.scannerCwd).not.toContain(path.basename(run.runner.workspace));
+  });
+
+  test('scans the path the input asked for, not just the workspace root', () => {
+    // Without this, removing DG_PATH from the step's env block changed
+    // nothing any test could see: every case used the default `.`, and
+    // "${ROOT}/" still contains the workspace either way, so the input could
+    // silently stop working while the suite stayed green.
+    const argv = argvFor({ path: 'packages/cli', 'sarif-output': 'args.txt' });
+    expect(argv).toContain('/workspace/packages/cli');
   });
 
   test('scans an absolute path, so the scan root survives the move', () => {
@@ -482,6 +635,41 @@ describe('action.yml "Validate inputs", trust-base', () => {
     const run = runValidateWith({ 'sarif-output': '.github/workflows/out.sarif' });
     expect(run.status).not.toBe(0);
     expect(run.stdout).toContain('must not write under .github/');
+  });
+
+  test('refuses the `./` spellings that reach the same place', () => {
+    // The first version of the .github/ guard compared strings, so
+    // `./.github/x` walked straight past it and resolved to the same file.
+    for (const spelling of [
+      './.github/workflows/out.sarif',
+      './/.github/out.sarif',
+      'a/./b.sarif',
+      './out.sarif',
+    ]) {
+      const run = runValidateWith({ 'sarif-output': spelling });
+      expect([spelling, run.status]).not.toEqual([spelling, 0]);
+    }
+    // And the plain form still works, so this did not just ban everything.
+    expect(runValidateWith({ 'sarif-output': 'out.sarif' }).status).toBe(0);
+    expect(runValidateWith({ path: '.' }).status).toBe(0);
+  });
+
+  test('refuses a version with a leading zero, which npm reads as a tag', () => {
+    // `01.2.3` is not semver, so npm falls back to treating the spec as a
+    // dist-tag: the exact family this input claims to refuse.
+    for (const bad of ['01.2.3', '00.0.0', '0.6.00', '0.06.0']) {
+      const run = runValidateWith({ version: bad });
+      expect([bad, run.status]).not.toEqual([bad, 0]);
+    }
+    expect(runValidateWith({ version: '0.6.0' }).status).toBe(0);
+    expect(runValidateWith({ version: '10.20.30' }).status).toBe(0);
+  });
+
+  test('tells someone pinned to `latest` what to do instead', () => {
+    // A refusal with no alternative in it is a wall. This is the migration
+    // the breaking change forces, so the message has to carry the answer.
+    const run = runValidateWith({ version: 'latest' });
+    expect(run.stdout).toContain('REMOVE the input');
   });
 });
 

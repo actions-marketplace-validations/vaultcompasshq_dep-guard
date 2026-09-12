@@ -155,9 +155,15 @@ runs:
         # against a directory rather than the registry. A charset that let
         # those through would be one committed file away from the tree under
         # judgment choosing its own scanner.
-        if [[ ! "${DG_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        # No leading zeros in any of the three numbers. `01.2.3` and `0.6.00`
+        # are not semver, so npm does not read them as versions at all: a spec
+        # it cannot parse as a version falls back to being treated as a
+        # DIST-TAG, which is the exact family this check exists to refuse. A
+        # regexp of `[0-9]+` three times let them through.
+        if [[ ! "${DG_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
           printf '::error::dep-guard: the `version` input must be an exact version like 0.6.0, and was %q\n' "${DG_VERSION}"
-          printf '::error::A dist-tag such as latest, a range, or anything else is refused. A value beginning with a dot or ending in .tgz is read by npm as a path rather than a version.\n'
+          printf '::error::A dist-tag such as latest, a range, a version with a leading zero such as 01.2.3, or anything else is refused. A value beginning with a dot or ending in .tgz is read by npm as a path rather than a version.\n'
+          printf '::error::If your workflow says `version: latest`, REMOVE the input: the default is the version this action tag shipped with, which is the pin you want.\n'
           exit 1
         fi
 
@@ -210,6 +216,16 @@ runs:
           fi
           if [[ "${value}" == *".."* ]]; then
             printf '::error::dep-guard: `%s` must not contain `..`: %q\n' "${name}" "${value}"
+            exit 1
+          fi
+          # ONE SPELLING PER LOCATION. A `.` path segment is a second name for
+          # the same file, and every guard below this one compares STRINGS: the
+          # `.github/` refusal matched `.github/x` and not `./.github/x`, which
+          # resolves to exactly the same place. Refusing the redundant spelling
+          # is simpler than teaching each guard to normalise, and it cannot
+          # drift out of step with them the way a second normaliser would.
+          if [[ "${value}" == *"./"* ]]; then
+            printf '::error::dep-guard: `%s` must not contain a `.` path segment; write the path without it: %q\n' "${name}" "${value}"
             exit 1
           fi
           if [[ "${value}" == /* ]]; then
@@ -332,6 +348,16 @@ runs:
         # that put its own node_modules/.bin on PATH before this action would
         # hand the head's copy back the resolution the install step took away.
         #
+        # WHAT THIS DOES NOT BUY. The shim it points at starts with
+        # `#!/usr/bin/env node`, so the INTERPRETER is still a PATH lookup. A
+        # workflow that adds the checkout's node_modules/.bin to GITHUB_PATH,
+        # together with a head that declares a dependency whose `bin` map
+        # contains `node`, still chooses the interpreter. That needs the
+        # workflow's cooperation, which puts it in the same class as a pull
+        # request editing the workflow file, declared out of scope above -- but
+        # the absolute path is not a complete answer on its own and should not
+        # be read as one.
+        #
         # THE LAYOUT ASSUMED HERE IS THE LINUX AND MACOS ONE, where a global
         # install puts its shims in <prefix>/bin. On Windows npm puts them in
         # the prefix directory itself, and this path would not exist.
@@ -364,6 +390,19 @@ runs:
         OUT="${ROOT}/${DG_SARIF_OUTPUT}"
         RESULTS_FILE=""
         mkdir -p "$(dirname "${OUT}")"
+
+        # A symlink is not covered by the `..` and leading-slash rules, which
+        # constrain the STRING. The head controls the default filename, so it
+        # can commit a symlink there pointing anywhere the runner can write,
+        # and the redirect below would follow it. That cannot change this run's
+        # verdict -- the scan has not happened yet and the SARIF is written
+        # after it -- but it can clobber a file a later step in the caller's
+        # workflow reads. Refused rather than followed.
+        if [[ -L "${OUT}" || -L "$(dirname "${OUT}")" ]]; then
+          printf '::error::dep-guard: `sarif-output` resolves through a symlink, which would write outside the path it names: %q\n' "${DG_SARIF_OUTPUT}"
+          printf '::error::Remove the symlink from the repository, or point sarif-output somewhere else.\n'
+          exit 1
+        fi
 
         # ABSOLUTE, built from the workspace. This step runs from the runner
         # temp rather than from the checkout, so a relative scan path would
