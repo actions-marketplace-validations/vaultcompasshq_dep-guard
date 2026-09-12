@@ -232,10 +232,14 @@ steps:
       fail-on: high
 ```
 
+No `version` input in that example, because the default is the version the
+action shipped with: the tag you pin the action to is the version that scans
+the pull request.
+
 Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
 `fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own
-default), plus `version` (the npm dist-tag or version to run, default
-`latest`), `trust-base` (see below), `sarif-output` (default
+default), plus `version` (an EXACT version, default the one the action
+shipped with), `trust-base` (see below), `sarif-output` (default
 `dep-guard-results.sarif`), and `upload-sarif` (set `false` to write the
 file without uploading it, for a repository that does not have code
 scanning enabled).
@@ -243,6 +247,32 @@ scanning enabled).
 The SARIF is uploaded *before* the run is failed, so a scan that found
 something still gets its findings into code scanning. `security-events:
 write` is required for the upload; `actions/checkout` must run first.
+
+### Where the scanner comes from
+
+The action installs `@vaultcompass/dep-guard` from the registry into a prefix
+under the runner temp and calls that copy by absolute path. It never runs the
+checkout's own `node_modules`, and never starts npm with the checkout as its
+working directory, so neither a committed `.npmrc` nor a package the head's
+lockfile put in `node_modules` can decide which program does the scanning.
+
+`version` no longer accepts a dist-tag, and no longer defaults to `latest`.
+Two reasons. A tag means the scanner judging a pull request is whichever one
+the registry served that morning rather than one decided in the workflow file.
+And npm reads a value beginning with a dot, or ending in `.tgz`, as a PATH
+rather than a version, which on a run that started inside the checkout was one
+committed file away from the tree handing over its own scanner. **If you were
+relying on the old `latest` default, pin an exact version now**; a dist-tag is
+refused with a message saying so.
+
+What this does not cover is the workflow file itself, which a pull request can
+edit like any other CI step. Branch protection on the base branch, with review
+required for `.github/workflows/**`, is the control for that.
+
+**Linux and macOS runners.** The installed binary is called at
+`<prefix>/bin/dep-guard`, which is where a global npm install puts its shims on
+those two. Windows puts them in the prefix directory itself, so the path would
+not exist and the job would fail as could-not-run.
 
 ## Pull-request mode (`--trust-base`)
 

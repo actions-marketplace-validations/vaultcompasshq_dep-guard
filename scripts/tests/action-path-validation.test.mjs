@@ -154,7 +154,21 @@ describe('action.yml text guards', () => {
   test('re-raises dep-guard exit code 2 rather than collapsing it into 1', () => {
     // Same bug class the generated pre-commit hook is built against: 2
     // means the checks did not run, which is not "there are findings".
-    expect(actionYml).toContain('exit "${DG_EXIT_CODE}"');
+    //
+    // This used to assert the literal `exit "${DG_EXIT_CODE}"`, which passed
+    // every code straight through INCLUDING the ones dep-guard never
+    // produces: 126 and 127 are the shell's, for a binary that is missing or
+    // not executable, and passing those through reported a failed install as
+    // a scan verdict. The step now names the three codes and maps everything
+    // else to 2, so the property is checked by running the step in
+    // action-run-script.test.mjs rather than by matching one line here. What
+    // stays textual is the part a behavioural test cannot see: that no branch
+    // collapses 2 into 1.
+    const reportAt = actionYml.indexOf('- name: Report dep-guard result');
+    expect(reportAt).toBeGreaterThan(-1);
+    const reportBlock = actionYml.slice(reportAt);
+    expect(reportBlock).toContain('exit 2');
+    expect(reportBlock).not.toMatch(/DG_EXIT_CODE.*==.*"2".*\n\s*.*exit 1/);
   });
 
   test('uploads the SARIF before the run is failed', () => {
