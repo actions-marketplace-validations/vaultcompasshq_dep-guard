@@ -37,6 +37,15 @@
 //      an action-only tag ships the scanner that is already published --
 //      if the default moved, the scanner changed and this is a package
 //      release whose packages were never bumped.
+//   e. a CHANGELOG.md entry for the tag version, because every condition
+//      above is also satisfied by a forgotten bump pushed as a new tag,
+//      and what separates that from a release is that somebody wrote it
+//      down.
+//
+// The package path is not left unchecked either: it also requires
+// action.yml's version default to equal the version being published, or
+// the tag the release creates would install a different scanner than the
+// release put on npm.
 //
 // The registry lookup is injected rather than imported so the tests can
 // run offline; scripts/classify-release-tag.mjs supplies the real one.
@@ -75,29 +84,64 @@ export function compareExactSemver(a, b) {
 /**
  * Reads the `default:` of action.yml's `version` input.
  *
- * Deliberately not a "first default: after version:" grep. That input's
- * description is a long block scalar that names example versions and the
- * word "default" in prose, so a looser reader would compare the tag
- * against a number nobody ships. The keys of an input sit at exactly four
- * spaces and the block scalar's content sits deeper, so anchoring on the
- * indentation is what separates the two -- and only the lines between
- * this input's own two-space key and the next one are considered at all.
+ * Deliberately not a "first default: after version:" grep, and scoped
+ * three ways, each closing off a different way of reading the wrong
+ * number:
+ *
+ *   * only inside the top-level `inputs:` block. `version` is a plausible
+ *     key elsewhere in an action file -- an `outputs:` block is the
+ *     obvious one -- and a reader that took the first `  version:` in the
+ *     file would compare the tag against whatever that other block said.
+ *   * only lines at exactly four spaces, so the `version` input's long
+ *     description block scalar, which names example versions and uses the
+ *     word "default" in prose, cannot be mistaken for the key.
+ *   * exactly one `default:` in the block, or it throws. Two would mean
+ *     the file says two different things about what this action installs,
+ *     and picking either one is a guess; YAML itself would resolve a
+ *     duplicate key silently by taking the last, which is precisely the
+ *     kind of quiet answer a release gate must not give.
  *
  * A real YAML parser would be better, but this file runs in the release
  * job BEFORE `pnpm install` (on purpose -- the whole point is to catch a
  * tag-time mistake before a fifteen-minute corpus walk), so it gets node
- * builtins and nothing else.
+ * builtins and nothing else. Every failure here is fatal rather than a
+ * fallback: not being able to read this number means not being able to
+ * check it.
  */
 export function readActionVersionDefault(actionYmlText) {
   const lines = String(actionYmlText).split('\n');
-  const start = lines.findIndex((line) => /^ {2}version:\s*$/.test(line));
-  if (start === -1) {
+
+  const inputsAt = lines.findIndex((line) => /^inputs:\s*$/.test(line));
+  if (inputsAt === -1) {
     throw new Error(
-      'action.yml has no `version:` input at the expected indentation, so the scanner version this action tag ships could not be read.'
+      'action.yml has no top-level `inputs:` block, so the scanner version this action tag ships could not be read.'
     );
   }
 
-  for (let i = start + 1; i < lines.length; i += 1) {
+  // The inputs block ends at the next top-level key (`runs:`, `outputs:`).
+  let inputsEnd = lines.length;
+  for (let i = inputsAt + 1; i < lines.length; i += 1) {
+    if (/^\S/.test(lines[i])) {
+      inputsEnd = i;
+      break;
+    }
+  }
+
+  let start = -1;
+  for (let i = inputsAt + 1; i < inputsEnd; i += 1) {
+    if (/^ {2}version:\s*$/.test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) {
+    throw new Error(
+      'action.yml has no `version:` input inside its `inputs:` block, so the scanner version this action tag ships could not be read.'
+    );
+  }
+
+  const found = [];
+  for (let i = start + 1; i < inputsEnd; i += 1) {
     const line = lines[i];
     // The next key at this input's own level, or any key shallower than
     // it, ends this input's block.
@@ -106,13 +150,49 @@ export function readActionVersionDefault(actionYmlText) {
     }
     const match = /^ {4}default:\s*(.*)$/.exec(line);
     if (match !== null) {
-      return match[1].trim().replace(/^['"]|['"]$/g, '');
+      found.push(match[1].trim().replace(/^['"]|['"]$/g, ''));
     }
   }
 
-  throw new Error(
-    "action.yml's `version:` input has no `default:` at the expected indentation, so the scanner version this action tag ships could not be read."
-  );
+  if (found.length === 0) {
+    throw new Error(
+      "action.yml's `version:` input has no `default:` at the expected indentation, so the scanner version this action tag ships could not be read."
+    );
+  }
+  if (found.length > 1) {
+    throw new Error(
+      `action.yml's \`version:\` input has ${found.length} \`default:\` keys (${found.join(', ')}). Which scanner this action tag installs is then ambiguous, and a release gate does not get to guess. Fix action.yml.`
+    );
+  }
+
+  return found[0];
+}
+
+/**
+ * A package release publishes version X and creates the tag vX, and that
+ * tag is what people put in `uses:`. So action.yml's version default has
+ * to be X as well, or the action that tag ships installs a different
+ * scanner than the release published -- the exact split docs/INVARIANTS.md
+ * warns about under "The action tag and the scanner version are two
+ * numbers", in the one direction where nobody chose it on purpose.
+ *
+ * Skipped when the package version carries a prerelease or is otherwise
+ * not exact semver: action.yml's version input refuses a prerelease pin
+ * outright, so there is no default it could legally carry that would equal
+ * such a version, and demanding one would make a prerelease package
+ * release impossible rather than safe.
+ */
+function assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescription }) {
+  if (parseExactSemver(coreVersion) === null) {
+    return;
+  }
+
+  const actionDefault = readActionVersionDefault(actionYmlText);
+  if (actionDefault !== coreVersion) {
+    throw new Error(
+      `This is a package release of version ${coreVersion} (${refDescription}), but action.yml's version input defaults to ${actionDefault}. The tag this release creates would install scanner ${actionDefault} while publishing ${coreVersion} -- a different scanner than it publishes. Move the default with the packages. Refusing to publish.`
+    );
+  }
 }
 
 /**
@@ -124,6 +204,8 @@ export function readActionVersionDefault(actionYmlText) {
  * @param {string} input.cliName             the cli package's npm name
  * @param {string} input.cliVersion          packages/cli's version
  * @param {string} input.actionYmlText       the contents of action.yml at this commit
+ * @param {string|null} input.changelogText  the contents of CHANGELOG.md at this
+ *        commit, or null if it could not be read
  * @param {(name: string, version: string) => string|null} input.publishedVersion
  *        the version the registry reports for name@version, or null if the
  *        lookup did not come back with exactly that version for any reason
@@ -138,6 +220,7 @@ export function classifyRelease({
   cliName,
   cliVersion,
   actionYmlText,
+  changelogText,
   publishedVersion,
 }) {
   // Unchanged from the original assertion, and still first: the two
@@ -154,20 +237,24 @@ export function classifyRelease({
   // workflow_dispatch has no tag at all. The branch guard earlier in the
   // job is what keeps a dispatch run on main; there is nothing here to
   // classify, and a dispatch run is always a package release.
+  //
+  // The package-release path proper is the line below it: the tag reads
+  // "v" + the package version. Neither consults the registry -- a package
+  // release publishes a version that is by definition not on the registry
+  // yet -- but both check action.yml's default, for the reason in
+  // assertPackageReleaseDefault.
   if (tagName === null || tagName === undefined || tagName === '') {
+    assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescription, tagName: null });
     return { actionOnly: false, scannerVersion: coreVersion };
   }
 
-  // The package-release path, byte for byte what it always was: the tag
-  // reads "v" + the package version. Nothing below this line runs for it,
-  // the registry included -- a package release publishes a version that
-  // is by definition not on the registry yet.
   if (tagName === `v${coreVersion}`) {
+    assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescription, tagName });
     return { actionOnly: false, scannerVersion: coreVersion };
   }
 
   // From here on this is an action-only CANDIDATE. It is not an
-  // action-only release until all four conditions below hold; a tag that
+  // action-only release until all five conditions below hold; a tag that
   // fails any of them is a mistake, and the difference between the two is
   // the whole reason this function exists.
   const tagVersionText = tagName.startsWith('v') ? tagName.slice(1) : null;
@@ -191,9 +278,30 @@ export function classifyRelease({
     );
   }
 
+  // A release nobody wrote down is a release nobody decided to make.
+  // Every condition above this one is satisfied by a plain forgotten bump
+  // -- packages left at 0.6.0, "v0.7.0" pushed in the belief that they
+  // had moved -- because such a tag is exact semver, greater than the
+  // package version, backed by published packages, and matched by an
+  // action default that never moved either. What separates that stray tag
+  // from a real action-only release is that somebody wrote the entry. It
+  // is a local check, on the tagged commit's own tree, so it costs
+  // nothing and runs before the registry lookup below.
+  if (typeof changelogText !== 'string') {
+    throw new Error(
+      `Tag ${tagName} looks like an action-only release, but CHANGELOG.md could not be read at the tagged commit, so its entry could not be checked. Refusing to publish.`
+    );
+  }
+  const headingPattern = new RegExp(`^##\\s*\\[${tagVersionText.replace(/\./g, '\\.')}\\]`, 'm');
+  if (!headingPattern.test(changelogText)) {
+    throw new Error(
+      `Tag ${tagName} looks like an action-only release, but CHANGELOG.md at the tagged commit has no "## [${tagVersionText}]" heading. An action-only release is still a release: a tag with no entry is far more likely to be a version bump someone forgot to commit than a deliberate one. Refusing to publish.`
+    );
+  }
+
   // The condition that actually carries the "never describes anything
-  // unpublished" property. Everything above is shape and ordering; this is
-  // the one that talks to the world.
+  // unpublished" property. Everything above is shape, ordering and this
+  // tree's own files; this is the one that talks to the world.
   for (const [name, version] of [
     [coreName, coreVersion],
     [cliName, cliVersion],

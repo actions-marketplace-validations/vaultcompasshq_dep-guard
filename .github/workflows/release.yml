@@ -14,13 +14,15 @@ name: Release
 #   * a PACKAGE release, where the tag reads "v" + the version both
 #     packages carry. Everything in this file runs.
 #   * an ACTION-ONLY release, where the tag moves past the scanner version
-#     and the packages stay where they are (v0.6.1 was the first). Nothing
-#     is published, so the re-verification above has nothing to protect:
-#     every build, test, corpus and publish step is skipped and the run
-#     only resolves the tag and cuts a GitHub Release. The code gates
-#     ci.yml already ran on the merge commit remain the gate for that
-#     commit, and the ~10-15 minute registry walk in "Build the shipped
-#     corpus" would be building a corpus nothing ships.
+#     and the packages stay where they are (v0.6.1 was the first). The
+#     code gates above still run on it -- they are what covers the
+#     action.yml and docs such a release actually ships, and this workflow
+#     never learns whether ci.yml ran on the exact commit that got tagged.
+#     What is skipped is everything that exists to protect a publish that
+#     does not happen: the ~10-15 minute registry walk in "Build the
+#     shipped corpus" and its checks, the packed-tarball install gate, and
+#     the publish itself. The run then resolves the tag and cuts a
+#     GitHub Release saying nothing was published.
 #
 # docs/INVARIANTS.md, "The action tag and the scanner version are two
 # numbers", is the long version of why those are two numbers at all.
@@ -48,10 +50,17 @@ jobs:
       id-token: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
-      # "true" only for an action-only tag, and only after every condition
-      # in scripts/lib/release-kind.mjs held. Every step this run skips
-      # reads it, and so does the smoke-published job below, which has
-      # nothing to smoke test when nothing was published.
+      # Exactly "true" or "false", written by the decision step, and only
+      # after every condition in scripts/lib/release-kind.mjs held.
+      #
+      # Every condition that reads it is spelled POSITIVELY -- publish-side
+      # steps run on "== 'false'", the action-only Release body on
+      # "== 'true'" -- never "!= 'true'". The difference only shows up when
+      # the value is neither: an output that is empty or missing (a step
+      # renamed, an id typo, a future edit that fails to set it) makes
+      # "!= 'true'" TRUE, which would publish on a run that never decided
+      # anything. Both spellings are equally readable and only one of them
+      # fails closed.
       action_only: ${{ steps.kind.outputs.action_only }}
 
     steps:
@@ -132,9 +141,14 @@ jobs:
     #      release and everything proceeds as it always has. Any other tag
     #      is an action-only CANDIDATE, and is refused unless it is exact
     #      semver, strictly greater than the package version by numeric
-    #      ordering, backed by both packages already being on the npm
-    #      registry at that package version, and matched by action.yml's
-    #      own version default. scripts/lib/release-kind.mjs holds those
+    #      ordering, written down as a "## [X.Y.Z]" entry in CHANGELOG.md
+    #      at the tagged commit, backed by both packages already being on
+    #      the npm registry at that package version, and matched by
+    #      action.yml's own version default. The package path is checked
+    #      too, not merely admitted: it requires action.yml's version
+    #      default to equal the version being published, since otherwise
+    #      the tag the release creates installs a different scanner than
+    #      the release put on npm. scripts/lib/release-kind.mjs holds those
     #      rules and the reasoning for each; scripts/tests/
     #      release-kind.test.mjs holds the cases, registry lookup and all,
     #      which is why this is a script rather than four more lines of
@@ -183,7 +197,8 @@ jobs:
             --core-version "${CORE_VERSION}" \
             --cli-name "${CLI_NAME}" \
             --cli-version "${CLI_VERSION}" \
-            --action-yml action.yml
+            --action-yml action.yml \
+            --changelog CHANGELOG.md
 
           # The checkout step above uses actions/checkout's default
           # fetch-depth (1), so this job's working copy holds only the
@@ -209,38 +224,44 @@ jobs:
             --core-version "${CORE_VERSION}" \
             --cli-name "${CLI_NAME}" \
             --cli-version "${CLI_VERSION}" \
-            --action-yml action.yml
+            --action-yml action.yml \
+            --changelog CHANGELOG.md
         fi
 
         echo "Release kind decided: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME}"
 
-    # Everything from here down to "Publish to npm" exists to protect a
-    # publish, and an action-only release performs none -- so every one of
-    # those steps carries the same "not action_only" condition. The step
-    # above is what decides that, and it refuses any tag that is not
-    # demonstrably one of the two shapes, so this condition can never be
-    # reached by a tag nobody vetted. The code gates themselves are not
-    # being waived: ci.yml ran build, typecheck, lint and test on the
-    # merge commit, and the ancestry check above proved this tag points at
-    # a commit that is on main.
+    # The code gates run on BOTH kinds of release, deliberately.
+    #
+    # The tempting argument is that ci.yml already ran them on this commit,
+    # so an action-only release can skip them. It does not hold. The
+    # ancestry check above proves the tagged commit is an ANCESTOR of main,
+    # which is weaker than "a commit ci.yml ran on": every intermediate
+    # commit of a merged PR branch is an ancestor of main, none of them got
+    # a CI run of its own, and a tag can be pushed at one. "ci.yml covered
+    # this commit" is an assumption about which commit was tagged, not
+    # something this workflow knows.
+    #
+    # And an action-only release's entire payload is action.yml plus docs
+    # -- exactly what "pnpm lint" (the public-repository hygiene guard,
+    # over tracked files) and the action suites under scripts/tests/ check.
+    # Skipping the gates there would skip the checks aimed at the only
+    # files such a release actually ships.
+    #
+    # What an action-only release genuinely does not need starts below:
+    # the corpus walk, and everything that exists to protect a publish.
     - name: Install dependencies
-      if: steps.kind.outputs.action_only != 'true'
       run: pnpm install --frozen-lockfile
 
     - name: Build packages
-      if: steps.kind.outputs.action_only != 'true'
       run: pnpm build
 
     - name: Typecheck
-      if: steps.kind.outputs.action_only != 'true'
       run: pnpm typecheck
 
     - name: Lint (public repository hygiene guard)
-      if: steps.kind.outputs.action_only != 'true'
       run: pnpm lint
 
     - name: Run tests
-      if: steps.kind.outputs.action_only != 'true'
       run: pnpm test
 
     # MUST run after "Run tests", never before. packages/cli/tests/cli.test.ts
@@ -266,7 +287,7 @@ jobs:
     # spend ten to fifteen minutes and several hundred requests against a
     # public registry replica producing an artifact nothing ships.
     - name: Build the shipped corpus
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       run: node scripts/build-corpus.mjs --out packages/core/data/corpus
 
     # Refuses to publish a corpus that is not actually fit to ship -- see
@@ -276,7 +297,7 @@ jobs:
     # a known-popular name resolving as present). This is stricter than
     # what loadCorpus itself tolerates at read time, by design.
     - name: Check the corpus is fit to publish
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       run: node scripts/check-shippable-corpus.mjs packages/core/data/corpus
 
     # Packs packages/core the same way the "Publish to npm" step below will,
@@ -291,7 +312,7 @@ jobs:
     # directory. See scripts/check-corpus-packed.mjs for the command this
     # runs and how it was verified.
     - name: Check the corpus reaches the packed tarball
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       run: node scripts/check-corpus-packed.mjs
 
     # This is the only pre-publish step that executes the shipped artifact
@@ -318,7 +339,7 @@ jobs:
     # the local pin correctly -- no separate install-core-first step and
     # no registry lookup needed.
     - name: Install the packed tarballs and run the shipped binary
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       run: |
         set -euo pipefail
         PACK_DIR="$(mktemp -d)"
@@ -395,7 +416,7 @@ jobs:
     # needs a newer Node than this job runs. Mirrors vault-guard's
     # release.yml, the model for this workflow.
     - name: Upgrade npm for OIDC trusted publishing
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       run: npm install -g npm@11
 
     # dep-guard-cli depends on dep-guard-core via workspace:*, which pnpm
@@ -416,7 +437,7 @@ jobs:
     # together (see the lockstep assertion above). A burned version number
     # is never re-released -- it is superseded by the next one.
     - name: Publish to npm
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       run: |
         set -euo pipefail
         for dir in packages/core packages/cli; do
@@ -448,7 +469,7 @@ jobs:
     # that did not happen. A single step with an interpolated body would
     # put that claim one expression edit away from being unconditional.
     - name: Create GitHub Release
-      if: steps.kind.outputs.action_only != 'true'
+      if: steps.kind.outputs.action_only == 'false'
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
       with:
         tag_name: ${{ steps.meta.outputs.tag }}
@@ -485,7 +506,7 @@ jobs:
     # an action-only tag that version does not exist on the registry and
     # never will. The job would wait out its twelve registry polls and
     # then fail a release that did exactly what it was supposed to.
-    if: needs.release.outputs.action_only != 'true'
+    if: needs.release.outputs.action_only == 'false'
     runs-on: ubuntu-latest
     steps:
       # No checkout step: this job's whole point is to exercise ONLY what a

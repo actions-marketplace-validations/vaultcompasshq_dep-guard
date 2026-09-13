@@ -15,7 +15,7 @@
 //     [--tag v0.6.1] \
 //     --core-name @vaultcompass/dep-guard-core --core-version 0.6.0 \
 //     --cli-name @vaultcompass/dep-guard --cli-version 0.6.0 \
-//     [--action-yml action.yml]
+//     [--action-yml action.yml] [--changelog CHANGELOG.md]
 //
 // Omit --tag for a workflow_dispatch run, which has no tag: the lockstep
 // check still runs and the answer is always a package release.
@@ -30,6 +30,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { appendFileSync, readFileSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,7 +38,17 @@ import { classifyRelease } from './lib/release-kind.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const FLAGS = ['--tag', '--core-name', '--core-version', '--cli-name', '--cli-version', '--action-yml'];
+const REGISTRY = 'https://registry.npmjs.org';
+
+const FLAGS = [
+  '--tag',
+  '--core-name',
+  '--core-version',
+  '--cli-name',
+  '--cli-version',
+  '--action-yml',
+  '--changelog',
+];
 const REQUIRED = ['--core-name', '--core-version', '--cli-name', '--cli-version'];
 
 function parseArgs(argv) {
@@ -68,11 +79,22 @@ function parseArgs(argv) {
 // delayed release; the other direction would let a tag claim a version
 // nobody can install, which is a wrong Release page that cannot be
 // un-published.
+//
+// Deliberately NOT run from the repository root, and deliberately passing
+// --registry: this lookup is the one thing standing between a tag and a
+// Release page claiming a published version, and npm reads .npmrc from
+// its working directory upward. A checked-in or generated .npmrc could
+// therefore point "is this published?" at some other registry -- one where
+// the answer is yes -- and the question this asks is specifically about
+// the public npm registry, not about whatever registry the tree prefers.
+// RUNNER_TEMP on a GitHub runner, the OS temp dir otherwise; either way a
+// directory this repository does not control the contents of.
 function makeNpmLookup(npmBin) {
+  const cwd = process.env.RUNNER_TEMP || tmpdir();
   return (name, version) => {
-    const result = spawnSync(npmBin, ['view', `${name}@${version}`, 'version'], {
+    const result = spawnSync(npmBin, ['view', `${name}@${version}`, 'version', `--registry=${REGISTRY}`], {
       encoding: 'utf8',
-      cwd: ROOT,
+      cwd,
     });
     if (result.error || result.status !== 0) {
       return null;
@@ -95,11 +117,11 @@ function main() {
   const tagName = args.get('--tag') ?? null;
   const actionYmlPath = path.resolve(args.get('--action-yml') ?? path.join(ROOT, 'action.yml'));
 
-  // Read action.yml lazily-ish: a package release never consults it, but
-  // reading it here keeps a missing file reported as a file problem rather
-  // than surfacing halfway through the decision. An unreadable action.yml
-  // is fatal either way -- the repository root's action IS one of the two
-  // things this workflow releases.
+  // An unreadable action.yml is fatal on BOTH paths, not only the
+  // action-only one: the repository root's action is one of the two things
+  // this workflow releases, and both paths now check its version default
+  // (see assertPackageReleaseDefault in the library). Reported here as a
+  // file problem rather than surfacing halfway through the decision.
   let actionYmlText;
   try {
     actionYmlText = readFileSync(actionYmlPath, 'utf8');
@@ -107,6 +129,19 @@ function main() {
     process.stderr.write(`::error::classify-release-tag: could not read ${actionYmlPath}: ${err.message}\n`);
     process.exitCode = 1;
     return;
+  }
+
+  // CHANGELOG.md, by contrast, is only consulted on the action-only path,
+  // so a failure to read it is passed along as null rather than made fatal
+  // here. The library turns that null into a refusal on the path that
+  // needs it, and a package release is not blocked by a file it never
+  // asks about.
+  const changelogPath = path.resolve(args.get('--changelog') ?? path.join(ROOT, 'CHANGELOG.md'));
+  let changelogText = null;
+  try {
+    changelogText = readFileSync(changelogPath, 'utf8');
+  } catch {
+    changelogText = null;
   }
 
   const refDescription = tagName === null ? 'not a tag push' : `tag ${tagName}`;
@@ -121,6 +156,7 @@ function main() {
       cliName: args.get('--cli-name'),
       cliVersion: args.get('--cli-version'),
       actionYmlText,
+      changelogText,
       publishedVersion: makeNpmLookup(process.env.DG_NPM_BIN ?? 'npm'),
     });
   } catch (err) {

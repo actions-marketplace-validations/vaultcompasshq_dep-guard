@@ -20,7 +20,7 @@
 // answer.
 
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -67,6 +67,15 @@ function actionYmlWith(defaultVersion) {
   ].join('\n');
 }
 
+// A CHANGELOG.md in this repository's own style: "## [0.6.1] - 2026-09-12".
+function changelogWith(...versions) {
+  return [
+    '# Changelog',
+    '',
+    ...versions.flatMap((version) => [`## [${version}] - 2026-09-12`, '', '- Something changed.', '']),
+  ].join('\n');
+}
+
 function registryStub(publishedSpecs) {
   const published = new Set(publishedSpecs);
   const calls = [];
@@ -80,7 +89,7 @@ function registryStub(publishedSpecs) {
 
 // The happy action-only case, spelled out once: packages at 0.6.0 and both
 // live on the registry at exactly that version, action.yml's default at
-// 0.6.0, tag v0.6.1.
+// 0.6.0, a CHANGELOG entry for 0.6.1, tag v0.6.1.
 function actionOnlyInputs(overrides = {}) {
   return {
     tagName: 'v0.6.1',
@@ -90,6 +99,7 @@ function actionOnlyInputs(overrides = {}) {
     cliName: CLI_NAME,
     cliVersion: '0.6.0',
     actionYmlText: actionYmlWith('0.6.0'),
+    changelogText: changelogWith('0.6.1', '0.6.0'),
     publishedVersion: registryStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]),
     ...overrides,
   };
@@ -145,6 +155,54 @@ describe('readActionVersionDefault', () => {
   it('throws when the version input has no default', () => {
     const yml = ['inputs:', '  version:', '    required: true', '  path:', '    default: .', ''].join('\n');
     expect(() => readActionVersionDefault(yml)).toThrow(/default/i);
+  });
+
+  it('throws when there is no inputs block at all', () => {
+    const yml = ['name: dep-guard', 'runs:', '  using: composite', ''].join('\n');
+    expect(() => readActionVersionDefault(yml)).toThrow(/inputs/i);
+  });
+
+  it('reads the version input, not a same-named key in another top-level block', () => {
+    // "version" is a plausible key outside inputs -- an outputs block is
+    // the obvious one -- and putting it FIRST is what catches a reader
+    // that takes the first "  version:" in the file. The number it would
+    // pick up here is not what the action installs, so the check it
+    // feeds would be comparing the tag against nothing meaningful.
+    const yml = [
+      'name: dep-guard',
+      'outputs:',
+      '  version:',
+      '    description: The version that ran',
+      '    default: 9.9.9',
+      'inputs:',
+      '  version:',
+      '    description: The version to install',
+      '    required: false',
+      '    default: 0.6.0',
+      'runs:',
+      '  using: composite',
+      '',
+    ].join('\n');
+    expect(readActionVersionDefault(yml)).toBe('0.6.0');
+  });
+
+  it('throws rather than choosing when the version input has two defaults', () => {
+    // YAML would resolve a duplicate key silently by taking the last one.
+    // A release gate does not get to answer a question the file gives two
+    // answers to.
+    const yml = [
+      'inputs:',
+      '  version:',
+      '    required: false',
+      '    default: 0.6.0',
+      '    default: 0.7.0',
+      '  path:',
+      '    default: .',
+      'runs:',
+      '  using: composite',
+      '',
+    ].join('\n');
+    expect(() => readActionVersionDefault(yml)).toThrow(/two|2 `default:`|ambiguous/i);
   });
 
   it('reads the real action.yml and finds an exact semver default', () => {
@@ -265,6 +323,115 @@ describe('classifyRelease', () => {
     ).toThrow(/action\.yml/i);
   });
 
+  it('fails a PACKAGE release whose action.yml default is not the version being published', () => {
+    // The symmetric half of the action-only default check, and the one
+    // that closes the split in the direction nobody chooses on purpose:
+    // publishing 0.7.0 under tag v0.7.0 while the action that tag ships
+    // still installs 0.6.0.
+    expect(() =>
+      classifyRelease(
+        actionOnlyInputs({
+          tagName: 'v0.7.0',
+          refDescription: 'tag v0.7.0',
+          coreVersion: '0.7.0',
+          cliVersion: '0.7.0',
+          actionYmlText: actionYmlWith('0.6.0'),
+        })
+      )
+    ).toThrow(/different scanner than it publishes/i);
+  });
+
+  it('accepts a package release whose action.yml default matches', () => {
+    const result = classifyRelease(
+      actionOnlyInputs({
+        tagName: 'v0.7.0',
+        refDescription: 'tag v0.7.0',
+        coreVersion: '0.7.0',
+        cliVersion: '0.7.0',
+        actionYmlText: actionYmlWith('0.7.0'),
+      })
+    );
+    expect(result).toEqual({ actionOnly: false, scannerVersion: '0.7.0' });
+  });
+
+  it('skips the default check for a prerelease package version, which the action cannot be pinned to', () => {
+    // action.yml refuses a prerelease pin outright, so there is no value
+    // its default could carry that would equal 0.7.0-rc.1. Requiring one
+    // would make a prerelease package release impossible rather than safe.
+    const result = classifyRelease(
+      actionOnlyInputs({
+        tagName: 'v0.7.0-rc.1',
+        refDescription: 'tag v0.7.0-rc.1',
+        coreVersion: '0.7.0-rc.1',
+        cliVersion: '0.7.0-rc.1',
+        actionYmlText: actionYmlWith('0.6.0'),
+      })
+    );
+    expect(result).toEqual({ actionOnly: false, scannerVersion: '0.7.0-rc.1' });
+  });
+
+  it('checks the action.yml default on a dispatch run too', () => {
+    // A dispatch run publishes and cuts a Release tagged v plus the
+    // package version, so the same split is reachable without a tag push.
+    expect(() =>
+      classifyRelease(
+        actionOnlyInputs({
+          tagName: null,
+          refDescription: 'branch main (not a tag push)',
+          actionYmlText: actionYmlWith('0.5.0'),
+        })
+      )
+    ).toThrow(/different scanner than it publishes/i);
+  });
+
+  it('fails an action-only tag with no CHANGELOG entry for its version', () => {
+    // The stray-tag case every other condition lets through: packages
+    // left at 0.6.0 and "v0.7.0" pushed in the belief that they had
+    // moved. Exact semver, greater, published, default in step -- and
+    // nobody wrote it down, because nobody decided to release it.
+    expect(() =>
+      classifyRelease(
+        actionOnlyInputs({
+          tagName: 'v0.7.0',
+          refDescription: 'tag v0.7.0',
+          changelogText: changelogWith('0.6.1', '0.6.0'),
+        })
+      )
+    ).toThrow(/CHANGELOG\.md/);
+  });
+
+  it('accepts an action-only tag whose version has a CHANGELOG entry', () => {
+    const result = classifyRelease(
+      actionOnlyInputs({
+        tagName: 'v0.7.0',
+        refDescription: 'tag v0.7.0',
+        changelogText: changelogWith('0.7.0', '0.6.1'),
+      })
+    );
+    expect(result.actionOnly).toBe(true);
+  });
+
+  it('fails an action-only tag when CHANGELOG.md could not be read at all', () => {
+    expect(() => classifyRelease(actionOnlyInputs({ changelogText: null }))).toThrow(/CHANGELOG\.md/);
+  });
+
+  it('checks the CHANGELOG before it touches the registry', () => {
+    // Local, on the tagged commit's own tree, and free. A stray tag
+    // should not cost a registry round trip to reject.
+    const publishedVersion = registryStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]);
+    expect(() =>
+      classifyRelease(
+        actionOnlyInputs({
+          tagName: 'v0.7.0',
+          refDescription: 'tag v0.7.0',
+          changelogText: changelogWith('0.6.0'),
+          publishedVersion,
+        })
+      )
+    ).toThrow(/CHANGELOG\.md/);
+    expect(publishedVersion.calls).toEqual([]);
+  });
+
   it('fails when core and cli versions disagree, before anything else is considered', () => {
     const publishedVersion = registryStub([]);
     expect(() =>
@@ -273,10 +440,13 @@ describe('classifyRelease', () => {
     expect(publishedVersion.calls).toEqual([]);
   });
 
-  it('checks lockstep and nothing else when there is no tag at all', () => {
+  it('never consults the registry when there is no tag at all', () => {
     // workflow_dispatch: GITHUB_REF_TYPE is "branch", there is no tag to
     // classify, and the branch guard earlier in the job is what keeps the
-    // run on main.
+    // run on main. Lockstep and the action.yml default are checked (see
+    // the dispatch case above); the registry is not, because a dispatch
+    // run is a package release and publishes a version that should not be
+    // there yet.
     const publishedVersion = registryStub([]);
     const result = classifyRelease({
       ...actionOnlyInputs(),
@@ -339,18 +509,35 @@ describe('.github/workflows/release.yml wiring', () => {
     process.env.DG_RELEASE_WORKFLOW ?? path.join(ROOT, '.github', 'workflows', 'release.yml'),
     'utf8'
   );
-  const GATE = "steps.kind.outputs.action_only != 'true'";
+  // Spelled positively, and asserted as this exact string. "!= 'true'" is
+  // the same thing right up until the output is empty or missing, at
+  // which point it publishes on a run that decided nothing.
+  const GATE = "steps.kind.outputs.action_only == 'false'";
 
   // The release job's steps sit at four spaces; the smoke job's at six, so
   // this reads only the first job.
-  function releaseJobSteps() {
-    const lines = workflow.split('\n');
+  //
+  // A step is identified by its name, or by "uses:<value>" when it has no
+  // name -- a step written "- uses: actions/checkout@..." with no name is
+  // valid YAML and perfectly ordinary, and a parser that only knew
+  // "- name:" would not see it at all. That blindness is exactly what an
+  // exact-list assertion must not have: an unnamed publish-side step
+  // would then be invisible to every check below rather than caught by
+  // them.
+  function parseSteps(text) {
+    const lines = text.split('\n');
     const steps = [];
     let current = null;
     for (const line of lines) {
       const nameMatch = /^ {4}- name: (.*)$/.exec(line);
-      if (nameMatch !== null) {
-        current = { name: nameMatch[1].trim(), if: null };
+      const usesMatch = /^ {4}- uses: (.*)$/.exec(line);
+      if (nameMatch !== null || usesMatch !== null) {
+        current = {
+          name: nameMatch === null ? null : nameMatch[1].trim(),
+          uses: usesMatch === null ? null : usesMatch[1].trim(),
+          if: null,
+        };
+        current.id = current.name ?? `uses:${current.uses}`;
         steps.push(current);
         continue;
       }
@@ -358,6 +545,10 @@ describe('.github/workflows/release.yml wiring', () => {
         const ifMatch = /^ {6}if: (.*)$/.exec(line);
         if (ifMatch !== null) {
           current.if = ifMatch[1].trim();
+        }
+        const usesLater = /^ {6}uses: (.*)$/.exec(line);
+        if (usesLater !== null && current.uses === null) {
+          current.uses = usesLater[1].trim();
         }
         if (/^ {2}\S/.test(line)) {
           current = null;
@@ -367,36 +558,89 @@ describe('.github/workflows/release.yml wiring', () => {
     return steps;
   }
 
-  // Every step that exists to protect, perform, or announce a publish.
-  // Asserted as an exact set: a new step on this side of the workflow
-  // without the gate fails here, and so does dropping the gate from one
-  // that has it. A step that genuinely should run on both paths (tag
-  // resolution, checkout) has to be left out of this list deliberately,
-  // which is the decision this test exists to force someone to make.
+  const releaseJobSteps = () => parseSteps(workflow);
+
+  // Every step that exists to protect or perform a publish, in the order
+  // the workflow runs them. The gates (build, typecheck, lint, test) are
+  // NOT here: they run on both kinds of release, because the ancestry
+  // check proves the tagged commit is an ancestor of main, not that CI
+  // ran on it, and an action-only release's payload is exactly what lint
+  // and the action suites cover.
   const GATED_STEPS = [
-    'Install dependencies',
-    'Build packages',
-    'Typecheck',
-    'Lint (public repository hygiene guard)',
-    'Run tests',
     'Build the shipped corpus',
     'Check the corpus is fit to publish',
     'Check the corpus reaches the packed tarball',
     'Install the packed tarballs and run the shipped binary',
     'Upgrade npm for OIDC trusted publishing',
     'Publish to npm',
-    'Create GitHub Release',
+  ];
+
+  // Every step between the decision and tag resolution, gated or not, in
+  // order. The set assertion below cannot see a NEW ungated step -- that
+  // is what this list is for: inserting anything here, named or unnamed,
+  // fails until somebody states which side of the gate it belongs on.
+  const STEPS_BETWEEN_DECISION_AND_RESOLVE = [
+    'Install dependencies',
+    'Build packages',
+    'Typecheck',
+    'Lint (public repository hygiene guard)',
+    'Run tests',
+    ...GATED_STEPS,
   ];
 
   it('gates exactly the publish-side steps on the decision step output', () => {
     const gated = releaseJobSteps()
       .filter((step) => step.if === GATE)
-      .map((step) => step.name);
-    expect(gated.sort()).toEqual([...GATED_STEPS].sort());
+      .map((step) => step.id);
+    // "Create GitHub Release" carries the same gate and is asserted
+    // separately below, with the body claim it guards.
+    expect(gated.sort()).toEqual([...GATED_STEPS, 'Create GitHub Release'].sort());
+  });
+
+  it('runs the code gates on both kinds of release', () => {
+    const ungated = ['Install dependencies', 'Build packages', 'Typecheck', 'Lint (public repository hygiene guard)', 'Run tests'];
+    for (const name of ungated) {
+      const step = releaseJobSteps().find((s) => s.id === name);
+      expect(step).toBeDefined();
+      expect(step.if).toBeNull();
+    }
+  });
+
+  it('accounts for every step between the decision and tag resolution, in order', () => {
+    const ids = releaseJobSteps().map((step) => step.id);
+    const from = ids.indexOf('Decide the release kind, and refuse a tag that is neither');
+    const to = ids.indexOf('Resolve release tag');
+    expect(from).toBeGreaterThan(-1);
+    expect(to).toBeGreaterThan(from);
+    expect(ids.slice(from + 1, to)).toEqual(STEPS_BETWEEN_DECISION_AND_RESOLVE);
+  });
+
+  it('sees a step written as bare `- uses:` with no name', () => {
+    // Every step in the real file happens to be named, so the fallback is
+    // exercised here against a synthetic job instead. Without it, an
+    // unnamed step inserted on the publish side would be invisible to the
+    // ordered list above rather than caught by it -- the list would still
+    // match, and the step would still run.
+    const synthetic = [
+      'jobs:',
+      '  release:',
+      '    steps:',
+      '    - name: Decide the release kind, and refuse a tag that is neither',
+      '      id: kind',
+      '    - uses: some/action@v1',
+      '    - name: Resolve release tag',
+      '',
+    ].join('\n');
+
+    expect(parseSteps(synthetic).map((step) => step.id)).toEqual([
+      'Decide the release kind, and refuse a tag that is neither',
+      'uses:some/action@v1',
+      'Resolve release tag',
+    ]);
   });
 
   it('leaves tag resolution ungated, since both kinds of release cut a Release', () => {
-    const resolve = releaseJobSteps().find((step) => step.name === 'Resolve release tag');
+    const resolve = releaseJobSteps().find((step) => step.id === 'Resolve release tag');
     expect(resolve).toBeDefined();
     expect(resolve.if).toBeNull();
   });
@@ -409,11 +653,11 @@ describe('.github/workflows/release.yml wiring', () => {
     const publishClaims = workflow.match(/Published `@vaultcompass\/dep-guard`/g) ?? [];
     expect(publishClaims).toHaveLength(1);
 
-    const release = releaseJobSteps().find((step) => step.name === 'Create GitHub Release');
+    const release = releaseJobSteps().find((step) => step.id === 'Create GitHub Release');
     expect(release.if).toBe(GATE);
 
     const actionOnlyRelease = releaseJobSteps().find(
-      (step) => step.name === 'Create GitHub Release (action-only)'
+      (step) => step.id === 'Create GitHub Release (action-only)'
     );
     expect(actionOnlyRelease.if).toBe("steps.kind.outputs.action_only == 'true'");
     expect(workflow).toContain('Nothing was published to npm by this release.');
@@ -421,8 +665,25 @@ describe('.github/workflows/release.yml wiring', () => {
   });
 
   it('skips the published-CLI smoke job when nothing was published', () => {
-    expect(workflow).toContain("if: needs.release.outputs.action_only != 'true'");
+    // Positive spelling here too: an empty output means no run decided
+    // anything, and the smoke job's whole premise is that a publish
+    // happened.
+    expect(workflow).toContain("if: needs.release.outputs.action_only == 'false'");
     expect(workflow).toContain('action_only: ${{ steps.kind.outputs.action_only }}');
+  });
+
+  it('never gates anything on the negative spelling', () => {
+    // The one assertion that would catch a well-meaning edit back to
+    // "!= 'true'", which reads identically and fails open.
+    expect(workflow).not.toContain("action_only != 'true'");
+    expect(workflow).not.toContain("action_only != 'false'");
+  });
+
+  it('passes the changelog to the decision script on both invocations', () => {
+    const invocations = workflow.match(/node scripts\/classify-release-tag\.mjs/g) ?? [];
+    expect(invocations).toHaveLength(2);
+    const changelogArgs = workflow.match(/--changelog CHANGELOG\.md/g) ?? [];
+    expect(changelogArgs).toHaveLength(2);
   });
 
   it('calls the decision script from a step with the id the conditions read', () => {
@@ -450,7 +711,10 @@ describe('classify-release-tag.mjs', () => {
       '#!/usr/bin/env node',
       "import { appendFileSync } from 'node:fs';",
       `const published = ${JSON.stringify(publishedSpecs)};`,
-      `appendFileSync(${JSON.stringify(log)}, process.argv.slice(2).join(' ') + '\\n');`,
+      // Logs the working directory it was started in as well as its
+      // arguments: where npm runs decides which .npmrc it reads, and that
+      // decides what "already published" means.
+      `appendFileSync(${JSON.stringify(log)}, 'cwd=' + process.cwd() + ' argv=' + process.argv.slice(2).join(' ') + '\\n');`,
       "const spec = process.argv[3] ?? '';",
       'if (!published.includes(spec)) {',
       "  process.stderr.write('npm error code E404\\n');",
@@ -499,9 +763,26 @@ describe('classify-release-tag.mjs', () => {
     return file;
   }
 
+  function withChangelog(...versions) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'dg-changelog-'));
+    const file = path.join(dir, 'CHANGELOG.md');
+    writeFileSync(file, changelogWith(...versions));
+    return file;
+  }
+
+  // The files every case below needs unless it is testing one of them: an
+  // action.yml whose default matches the package version, and a CHANGELOG
+  // carrying an entry for the action-only tag these tests push.
+  const files = (actionDefault = '0.6.0', changelogVersions = ['0.6.1', '0.6.0']) => [
+    '--action-yml',
+    withActionYml(actionDefault),
+    '--changelog',
+    withChangelog(...changelogVersions),
+  ];
+
   it('reports action_only=true and the scanner version for a valid action-only tag', () => {
     const stub = makeNpmStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]);
-    const result = run([...baseArgs('v0.6.1'), '--action-yml', withActionYml('0.6.0')], {
+    const result = run([...baseArgs('v0.6.1'), ...files()], {
       DG_NPM_BIN: stub.bin,
     });
 
@@ -511,9 +792,54 @@ describe('classify-release-tag.mjs', () => {
     expect(readFileSync(stub.log, 'utf8')).toContain(`view ${CORE_NAME}@0.6.0 version`);
   });
 
+  it('asks the public registry, from a directory this repository does not control', () => {
+    // npm reads .npmrc from its working directory upward, so running the
+    // lookup at the repository root would let a checked-in or generated
+    // .npmrc decide what "already published" means -- the one question
+    // standing between a tag and a Release page claiming a published
+    // version. Hence a temp directory, and an explicit --registry.
+    const stub = makeNpmStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]);
+    const result = run([...baseArgs('v0.6.1'), ...files()], { DG_NPM_BIN: stub.bin });
+    expect(result.status).toBe(0);
+
+    const log = readFileSync(stub.log, 'utf8');
+    const cwds = [...log.matchAll(/^cwd=(.*?) argv=/gm)].map((m) => m[1]);
+    expect(cwds.length).toBeGreaterThan(0);
+    for (const cwd of cwds) {
+      expect(cwd).not.toBe(ROOT);
+      expect(cwd.startsWith(ROOT)).toBe(false);
+    }
+    expect(log).toContain('--registry=https://registry.npmjs.org');
+  });
+
+  it('runs the lookup in RUNNER_TEMP when the runner provides one', () => {
+    const runnerTemp = mkdtempSync(path.join(tmpdir(), 'dg-runner-temp-'));
+    const stub = makeNpmStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]);
+    const result = run([...baseArgs('v0.6.1'), ...files()], {
+      DG_NPM_BIN: stub.bin,
+      RUNNER_TEMP: runnerTemp,
+    });
+
+    expect(result.status).toBe(0);
+    // realpath: the OS temp dir resolves through a symlink on macOS, so
+    // the child reports the resolved path for the value handed in here.
+    expect(readFileSync(stub.log, 'utf8')).toContain(`cwd=${realpathSync(runnerTemp)} `);
+  });
+
+  it('refuses an action-only tag whose version has no CHANGELOG entry', () => {
+    const stub = makeNpmStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]);
+    const result = run([...baseArgs('v0.6.1'), ...files('0.6.0', ['0.6.0'])], {
+      DG_NPM_BIN: stub.bin,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout + result.stderr).toContain('CHANGELOG.md');
+    expect(result.outputs).not.toContain('action_only=true');
+  });
+
   it('reports action_only=false for a package-release tag and never runs npm', () => {
     const stub = makeNpmStub([]);
-    const result = run([...baseArgs('v0.6.0'), '--action-yml', withActionYml('0.6.0')], {
+    const result = run([...baseArgs('v0.6.0'), ...files()], {
       DG_NPM_BIN: stub.bin,
     });
 
@@ -522,9 +848,18 @@ describe('classify-release-tag.mjs', () => {
     expect(readFileSync(stub.log, 'utf8')).toBe('');
   });
 
+  it('refuses a package-release tag whose action.yml default is a different version', () => {
+    const stub = makeNpmStub([]);
+    const result = run([...baseArgs('v0.6.0'), ...files('0.5.0')], { DG_NPM_BIN: stub.bin });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout + result.stderr).toContain('different scanner than it publishes');
+    expect(readFileSync(stub.log, 'utf8')).toBe('');
+  });
+
   it('exits 1 with a workflow error annotation when the packages are not published', () => {
     const stub = makeNpmStub([]);
-    const result = run([...baseArgs('v0.6.1'), '--action-yml', withActionYml('0.6.0')], {
+    const result = run([...baseArgs('v0.6.1'), ...files()], {
       DG_NPM_BIN: stub.bin,
     });
 
@@ -548,7 +883,7 @@ describe('classify-release-tag.mjs', () => {
     writeFileSync(bin, '#!/bin/sh\nexit 7\n');
     chmodSync(bin, 0o755);
 
-    const result = run([...baseArgs('v0.6.1'), '--action-yml', withActionYml('0.6.0')], {
+    const result = run([...baseArgs('v0.6.1'), ...files()], {
       DG_NPM_BIN: bin,
     });
     expect(result.status).toBe(1);
