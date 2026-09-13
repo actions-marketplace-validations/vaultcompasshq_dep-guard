@@ -1,0 +1,312 @@
+{
+  "version": 1,
+  "scannerVersion": "0.6.0",
+  "cases": [
+    {
+      "id": "current--npmrc-and-planted-copy",
+      "action": "current",
+      "scenario": "npmrc-and-planted-copy",
+      "observed": {
+        "scannerThatRan": "installed-real",
+        "steps": {
+          "install": {
+            "present": true,
+            "status": 0
+          },
+          "run": {
+            "present": true,
+            "status": 0
+          }
+        },
+        "markers": {
+          "hostileRegistryCopyRan": false,
+          "plantedCopyRan": false
+        },
+        "evilRegistry": {
+          "requestCount": 0,
+          "paths": []
+        },
+        "legitRegistry": {
+          "contacted": true,
+          "paths": [
+            "/@vaultcompass/dep-guard",
+            "/@vaultcompass/dep-guard-core",
+            "/@vaultcompass/dep-guard-core/-/dep-guard-core-0.6.0.tgz",
+            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz",
+            "/commander",
+            "/commander/-/commander-12.1.0.tgz",
+            "/yaml",
+            "/yaml/-/yaml-2.9.0.tgz"
+          ]
+        },
+        "installedScanner": {
+          "present": true,
+          "underRunnerPrefix": true,
+          "version": "0.6.0"
+        },
+        "sarif": {
+          "kind": "real-scanner",
+          "ruleIds": [
+            "dep-guard/typosquat",
+            "dep-guard/unknown-package"
+          ],
+          "ruleCatalogue": 7
+        },
+        "gate": {
+          "exitCode": "1",
+          "resultsFileRecorded": true
+        }
+      }
+    },
+    {
+      "id": "current--npmrc-only",
+      "action": "current",
+      "scenario": "npmrc-only",
+      "observed": {
+        "scannerThatRan": "installed-real",
+        "steps": {
+          "install": {
+            "present": true,
+            "status": 0
+          },
+          "run": {
+            "present": true,
+            "status": 0
+          }
+        },
+        "markers": {
+          "hostileRegistryCopyRan": false,
+          "plantedCopyRan": false
+        },
+        "evilRegistry": {
+          "requestCount": 0,
+          "paths": []
+        },
+        "legitRegistry": {
+          "contacted": true,
+          "paths": [
+            "/@vaultcompass/dep-guard",
+            "/@vaultcompass/dep-guard-core",
+            "/@vaultcompass/dep-guard-core/-/dep-guard-core-0.6.0.tgz",
+            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz",
+            "/commander",
+            "/commander/-/commander-12.1.0.tgz",
+            "/yaml",
+            "/yaml/-/yaml-2.9.0.tgz"
+          ]
+        },
+        "installedScanner": {
+          "present": true,
+          "underRunnerPrefix": true,
+          "version": "0.6.0"
+        },
+        "sarif": {
+          "kind": "real-scanner",
+          "ruleIds": [
+            "dep-guard/typosquat",
+            "dep-guard/unknown-package"
+          ],
+          "ruleCatalogue": 7
+        },
+        "gate": {
+          "exitCode": "1",
+          "resultsFileRecorded": true
+        }
+      }
+    },
+    {
+      "id": "current--scoped-npmrc-only",
+      "action": "current",
+      "scenario": "scoped-npmrc-only",
+      "observed": {
+        "scannerThatRan": "installed-real",
+        "steps": {
+          "install": {
+            "present": true,
+            "status": 0
+          },
+          "run": {
+            "present": true,
+            "status": 0
+          }
+        },
+        "markers": {
+          "hostileRegistryCopyRan": false,
+          "plantedCopyRan": false
+        },
+        "evilRegistry": {
+          "requestCount": 0,
+          "paths": []
+        },
+        "legitRegistry": {
+          "contacted": true,
+          "paths": [
+            "/@vaultcompass/dep-guard",
+            "/@vaultcompass/dep-guard-core",
+            "/@vaultcompass/dep-guard-core/-/dep-guard-core-0.6.0.tgz",
+            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz",
+            "/commander",
+            "/commander/-/commander-12.1.0.tgz",
+            "/yaml",
+            "/yaml/-/yaml-2.9.0.tgz"
+          ]
+        },
+        "installedScanner": {
+          "present": true,
+          "underRunnerPrefix": true,
+          "version": "0.6.0"
+        },
+        "sarif": {
+          "kind": "real-scanner",
+          "ruleIds": [
+            "dep-guard/typosquat",
+            "dep-guard/unknown-package"
+          ],
+          "ruleCatalogue": 7
+        },
+        "gate": {
+          "exitCode": "1",
+          "resultsFileRecorded": true
+        }
+      }
+    },
+    {
+      "id": "v0.6.0--npmrc-and-planted-copy",
+      "action": "v0.6.0",
+      "scenario": "npmrc-and-planted-copy",
+      "observed": {
+        "scannerThatRan": "planted-copy",
+        "steps": {
+          "install": {
+            "present": false,
+            "status": null
+          },
+          "run": {
+            "present": true,
+            "status": 0
+          }
+        },
+        "markers": {
+          "hostileRegistryCopyRan": false,
+          "plantedCopyRan": true
+        },
+        "evilRegistry": {
+          "requestCount": 0,
+          "paths": []
+        },
+        "legitRegistry": {
+          "contacted": false,
+          "paths": []
+        },
+        "installedScanner": {
+          "present": false,
+          "underRunnerPrefix": false,
+          "version": null
+        },
+        "sarif": {
+          "kind": "stand-in",
+          "ruleIds": [],
+          "ruleCatalogue": 0
+        },
+        "gate": {
+          "exitCode": "0",
+          "resultsFileRecorded": true
+        }
+      }
+    },
+    {
+      "id": "v0.6.0--npmrc-only",
+      "action": "v0.6.0",
+      "scenario": "npmrc-only",
+      "observed": {
+        "scannerThatRan": "hostile-registry",
+        "steps": {
+          "install": {
+            "present": false,
+            "status": null
+          },
+          "run": {
+            "present": true,
+            "status": 0
+          }
+        },
+        "markers": {
+          "hostileRegistryCopyRan": true,
+          "plantedCopyRan": false
+        },
+        "evilRegistry": {
+          "requestCount": 3,
+          "paths": [
+            "/@vaultcompass/dep-guard",
+            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz"
+          ]
+        },
+        "legitRegistry": {
+          "contacted": false,
+          "paths": []
+        },
+        "installedScanner": {
+          "present": false,
+          "underRunnerPrefix": false,
+          "version": null
+        },
+        "sarif": {
+          "kind": "stand-in",
+          "ruleIds": [],
+          "ruleCatalogue": 0
+        },
+        "gate": {
+          "exitCode": "0",
+          "resultsFileRecorded": true
+        }
+      }
+    },
+    {
+      "id": "v0.6.0--scoped-npmrc-only",
+      "action": "v0.6.0",
+      "scenario": "scoped-npmrc-only",
+      "observed": {
+        "scannerThatRan": "hostile-registry",
+        "steps": {
+          "install": {
+            "present": false,
+            "status": null
+          },
+          "run": {
+            "present": true,
+            "status": 0
+          }
+        },
+        "markers": {
+          "hostileRegistryCopyRan": true,
+          "plantedCopyRan": false
+        },
+        "evilRegistry": {
+          "requestCount": 3,
+          "paths": [
+            "/@vaultcompass/dep-guard",
+            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz"
+          ]
+        },
+        "legitRegistry": {
+          "contacted": false,
+          "paths": []
+        },
+        "installedScanner": {
+          "present": false,
+          "underRunnerPrefix": false,
+          "version": null
+        },
+        "sarif": {
+          "kind": "stand-in",
+          "ruleIds": [],
+          "ruleCatalogue": 0
+        },
+        "gate": {
+          "exitCode": "0",
+          "resultsFileRecorded": true
+        }
+      }
+    }
+  ]
+}

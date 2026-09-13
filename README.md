@@ -278,6 +278,13 @@ What this does not cover is the workflow file itself, which a pull request can
 edit like any other CI step. Branch protection on the base branch, with review
 required for `.github/workflows/**`, is the control for that.
 
+`bench/action-install.mjs` proves the install boundary above against real npm:
+a committed `.npmrc` and a planted `node_modules` copy, run against two local
+registries and the pre-fix `action.yml` from tag `v0.6.0` as a negative
+control. `pnpm bench:action-install` runs it and exits non-zero on any drift
+from the recorded baseline; `pnpm bench:action-install:update-baseline`
+re-records it after a deliberate change.
+
 **Linux and macOS runners.** The installed binary is called at
 `<prefix>/bin/dep-guard`, which is where a global npm install puts its shims on
 those two. Windows puts them in the prefix directory itself, so the path would

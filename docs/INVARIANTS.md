@@ -1850,14 +1850,19 @@ chose has moved the decision, not removed it.
 
 The Action used to run `npx --yes "@vaultcompass/dep-guard@${DG_VERSION}"`
 with the checkout as its working directory. Two routes followed from that.
-Both were exercised against real npm during the investigation, and **neither
-is pinned by anything in this repository**, which is a gap rather than an
-oversight worth leaving unsaid: the suite stubs npm, so it can prove the
-action no longer ASKS npm to run from the checkout, and cannot prove what npm
-would do if it did. Closing that needs a dogfood harness that runs real npm
-against a fixture tree and records a baseline a later run can diff, the way
-`validate:public-repos` does for scanning. Until then the two routes below are
-recorded reasoning plus a one-off measurement, not a regression test:
+Both were exercised against real npm during the investigation, and **both are
+now pinned**: `bench/action-install.mjs` runs action.yml's own install and run
+steps against real npm and two local, ephemeral-port registries (no network),
+once for this worktree's current `action.yml` and once for the pre-fix
+`action.yml` read out of the `v0.6.0` tag, across three checkout shapes -- a
+committed `.npmrc` alone, the scoped-key variant, and a planted `node_modules`
+copy alongside it. The recorded result is `bench/baseline.action-install.json`;
+`pnpm bench:action-install` compares a fresh run against it and exits non-zero
+on any drift, and `pnpm bench:action-install:update-baseline` re-records it.
+The v0.6.0 cases are the negative control: if they ever stop showing the
+attack, the harness has stopped being able to see the thing it exists to
+watch for, and `--compare` fails on that as loudly as on a regression in the
+current action. The two routes it pins:
 
 - **A committed `.npmrc` repoints the registry.** npx in non-global mode
   reads project config from its cwd, and `--yes` means no prompt. A pull
@@ -1913,6 +1918,11 @@ one or the other, as of 0.6.1:
 - `README.md`, the prose about which scanner a tag installs (both numbers)
 - `CHANGELOG.md`, the release heading and any migration line naming a tag
 - `package.json` and each `packages/*/package.json` (the scanner version)
+- `bench/baseline.action-install.json`'s `scannerVersion` field and its
+  `current--*` case ids' `installedScanner.version`, which record the version
+  the dogfood harness packed and installed; a scanner bump without a
+  `pnpm bench:action-install:update-baseline` leaves this baseline out of step
+  with the number everywhere else on this list, and `--compare` catches it.
 
 **The release workflow now knows both shapes, and the tag has to earn the
 second one.** `.github/workflows/release.yml` used to assert that a pushed tag
