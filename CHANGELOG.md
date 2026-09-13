@@ -10,6 +10,23 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-12
+
+**An action-only release. The tag moves; the npm packages do not.** Nothing in
+the scanner changed, so `@vaultcompass/dep-guard` stays at 0.6.0 on npm and the
+action's `version` default stays `0.6.0`, which is the scanner this action tag
+installs and was tested against.
+
+That makes the action tag and the scanner version two different numbers for the
+first time, and it is deliberate rather than an oversight:
+`vaultcompasshq/dep-guard@v0.6.1` installs `@vaultcompass/dep-guard@0.6.0`.
+Publishing an identical scanner as 0.7.0 so the two strings matched would burn a
+version number on a change that touches no scanning code, through a
+trusted-publisher path that is a one-way door.
+
+**Pinning `vaultcompasshq/dep-guard@v0.6.0` gets the OLD action**, the one that
+installs the scanner from inside the checkout. Move to `@v0.6.1`.
+
 ### Security
 
 - **The Action installs the scanner from outside the tree it scans.** It ran
@@ -52,13 +69,6 @@ GitHub release notes, which are generated from the commit history.
   `trust-base: off` is refused in any capitalisation; a version with a leading
   zero such as `01.2.3` is refused, because npm does not read it as a version
   at all and falls back to treating the spec as a dist-tag.
-
-### Release note
-
-Pinning `vaultcompasshq/dep-guard@v0.6.0` gets the OLD action, the one that
-installs the scanner from inside the checkout. The tag has to move for this
-fix to reach anyone, and the action's `version` default has to be bumped in
-the same release, or the action will install a scanner older than itself.
 
 ## [0.6.0] - 2026-09-06
 

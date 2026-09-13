@@ -237,6 +237,14 @@ this action tag shipped with. Leaving it out is the recommended shape: the
 action tag then decides the scanner, and there is one pin to bump instead of
 two that can disagree.
 
+**The action tag and the scanner version are separate numbers, and they do not
+have to match.** `vaultcompasshq/dep-guard@v0.6.1` installs
+`@vaultcompass/dep-guard@0.6.0`, because that release changed the action and
+nothing in the scanner, so there was no new scanner to publish. Read the action
+tag as "which version of the workflow step", not as "which version of the
+scanner". The `version` default is always the scanner that tag was tested
+against, which is the other reason to leave the input out.
+
 Inputs: `path` (default `.`), `online` (`true`/`false`, default `false`),
 `fail-on` (`critical|high|medium|low|none`, unset means dep-guard's own
 default), plus `version` (an EXACT version, default the one the action
