@@ -1371,9 +1371,12 @@ this project actually publishes.
 
 `packages/core` and `packages/cli` always move to a new version together,
 even when only one of them changed. `.github/workflows/release.yml`
-asserts this before publish (see its "Assert core and cli versions match
-each other, and the tag if there is one" step) and refuses to continue if
-they disagree.
+asserts this before publish (see its "Decide the release kind, and refuse a
+tag that is neither" step, which calls `scripts/classify-release-tag.mjs`)
+and refuses to continue if they disagree. The lockstep check is the first
+thing that script does, before it even looks at the tag, so a lockstep break
+reports as a lockstep break rather than as a tag mismatch -- and it runs on
+both kinds of release, an action-only tag included.
 
 The reason is `pnpm`'s own publish behavior, not caution for its own
 sake: `packages/cli/package.json` depends on core via `workspace:*`, and
