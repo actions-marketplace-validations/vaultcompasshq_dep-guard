@@ -1846,8 +1846,15 @@ that reads its config from the base branch and then runs a binary the head
 chose has moved the decision, not removed it.
 
 The Action used to run `npx --yes "@vaultcompass/dep-guard@${DG_VERSION}"`
-with the checkout as its working directory. Two routes followed from that,
-both verified against real npm rather than reasoned about:
+with the checkout as its working directory. Two routes followed from that.
+Both were exercised against real npm during the investigation, and **neither
+is pinned by anything in this repository**, which is a gap rather than an
+oversight worth leaving unsaid: the suite stubs npm, so it can prove the
+action no longer ASKS npm to run from the checkout, and cannot prove what npm
+would do if it did. Closing that needs a dogfood harness that runs real npm
+against a fixture tree and records a baseline a later run can diff, the way
+`validate:public-repos` does for scanning. Until then the two routes below are
+recorded reasoning plus a one-off measurement, not a regression test:
 
 - **A committed `.npmrc` repoints the registry.** npx in non-global mode
   reads project config from its cwd, and `--yes` means no prompt. A pull
@@ -1876,13 +1883,39 @@ and exits 2 on every run, with a message telling the caller to fetch the
 base branch with `fetch-depth: 0`, which they already did. A permanently red
 required check explained by advice that cannot fix it. Ship both or neither.
 
-**The version input takes an exact version only**, and defaults to the one
-the action shipped with. A dist-tag hands the choice of program to the
-registry on the morning of the run. A charset check is not enough on its
-own: npm's specifier parser reads a value beginning with `.` or ending in
-`.tgz` as a local path, so `.`, `..` and `payload.tgz` resolve against a
-directory instead of the registry, and a value that is not valid semver at
-all, such as `01.2.3` or `0.6.00`, falls back to being treated as a dist-tag.
+**The version input takes an exact version only**, and defaults to the
+SCANNER version the action tag shipped with, which is a different number from
+the tag whenever an action-only release happens. A dist-tag hands the choice
+of program to the registry on the morning of the run. A charset check is not
+enough on its own: npm's specifier parser reads a value beginning with `.` or
+ending in `.tgz` as a local path, so `.`, `..` and `payload.tgz` resolve
+against a directory instead of the registry, and a value that is not valid
+semver at all, such as `01.2.3` or `0.6.00`, falls back to being treated as a
+dist-tag.
+
+## The action tag and the scanner version are two numbers, and both get bumped
+
+0.6.1 was the first release where they came apart, and the release commit that
+created the split broke this rule inside itself: the README's copy-paste
+example still said `@v0.6.0` while the prose ten lines below told the reader
+to move to `@v0.6.1`. The one block anybody actually copies was the one
+handing them the pre-fix action. A reviewer caught it.
+
+**The rule: when either number moves, grep for BOTH.** The places that carry
+one or the other, as of 0.6.1:
+
+- `action.yml`, the `version` input's `default:` (the scanner version)
+- `action.yml`, the `version` input's description, which names an example
+- `README.md`, the `uses: vaultcompasshq/dep-guard@vX.Y.Z` example (the tag)
+- `README.md`, the prose about which scanner a tag installs (both numbers)
+- `CHANGELOG.md`, the release heading and any migration line naming a tag
+- `package.json` and each `packages/*/package.json` (the scanner version)
+
+They are allowed to differ, and an action-only release is the normal reason:
+nothing in the scanner changed, so publishing a new scanner purely to keep two
+strings matching would burn a version through a one-way trusted-publisher
+path. What is not allowed is a document telling a reader to pin one number
+while an example next to it pins the other.
 
 **What this does NOT cover**, and the comment in `action.yml` says so: a
 pull request can edit the workflow file, because a `pull_request` run uses

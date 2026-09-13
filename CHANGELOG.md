@@ -64,11 +64,19 @@ installs the scanner from inside the checkout. Move to `@v0.6.1`.
   already created the target, so `upload-sarif` was handed a zero-byte file
   and failed the job with a parse error that buried the real cause.
 - **Input validation.** No value may begin with a dash, rather than only the
-  ref; `sarif-output` may not be written under `.github/`, nor through a
-  committed symlink, nor by a `./` spelling that reaches the same place;
-  `trust-base: off` is refused in any capitalisation; a version with a leading
-  zero such as `01.2.3` is refused, because npm does not read it as a version
-  at all and falls back to treating the spec as a dist-tag.
+  ref. `trust-base: off` is refused in any capitalisation. A version with a
+  leading zero such as `01.2.3` is refused, because npm does not read it as a
+  version at all and falls back to treating the spec as a dist-tag.
+- **`sarif-output` may not resolve under `.github/`**, which holds the workflow
+  file and the CODEOWNERS entry that decide how this gate runs. Compared after
+  normalising `./` segments, doubled slashes and case to a fixed point, so
+  `./.github/x` and `.GitHub/x` are refused too. A `./` prefix is still
+  perfectly legal on any input; an earlier draft of this release refused it
+  outright and would have broken `path: ./src`.
+- **`sarif-output` may not resolve through a symlink**, at the file or at any
+  directory on the way to it, checked before the containing directories are
+  created rather than after. The head controls those, and a symlink there
+  sends the write outside the workspace.
 
 ## [0.6.0] - 2026-09-06
 

@@ -18,7 +18,16 @@
 // than another text guard in action-path-validation.test.mjs.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -105,17 +114,31 @@ function extractStepEnv(stepName) {
 // quotes, which turns a CORRECT action.yml red and invites the next person to
 // loosen the assertion instead of fixing the parser.
 //
+// A later review found a third case, which is the first two TOGETHER: the
+// quote check returned early, so a quoted value carrying a trailing comment
+// kept its quotes and turned a correct action.yml red. Strip the comment
+// first, then the quotes, so neither order matters.
+//
 // This is a parser for the subset action.yml actually uses, not a YAML
-// implementation. It is deliberately strict about that subset and refuses to
-// guess: a value it cannot read unambiguously throws rather than degrading.
+// implementation. An earlier version of this comment claimed it "refuses to
+// guess" and "throws rather than degrading". It did neither, and saying so was
+// worse than the gap itself: it invited the next reader to trust a property
+// nothing implemented. What it actually does is handle the subset below and
+// return the rest as-is.
 function normaliseScalar(raw) {
-  let value = raw;
-  const quoted = /^(['"])(.*)\1\s*$/.exec(value.trim());
+  let value = raw.trim();
+  // A `#` only starts a comment when whitespace precedes it, so `a#b` is a
+  // value. Skipped entirely inside a quoted scalar, where `#` is literal.
+  if (!/^['"]/.test(value)) {
+    const comment = /\s+#.*$/.exec(value);
+    if (comment) value = value.slice(0, comment.index).trim();
+  } else {
+    const closing = /^(['"])(.*)\1(\s+#.*)?$/.exec(value);
+    if (closing) return closing[2];
+  }
+  const quoted = /^(['"])(.*)\1$/.exec(value);
   if (quoted) return quoted[2];
-  // A `#` only starts a comment when whitespace precedes it; `a#b` is a value.
-  const comment = /\s+#.*$/.exec(value);
-  if (comment) value = value.slice(0, comment.index);
-  return value.trim();
+  return value;
 }
 
 // The step's declared working directory, or '' when it declares none.
@@ -124,15 +147,28 @@ function normaliseScalar(raw) {
 // is asserting a property of itself: the isolation tests below would pass on an
 // action.yml that had lost `working-directory` entirely, which is precisely the
 // line that keeps npm from starting with the head's .npmrc under its cwd.
+// YAML mappings are unordered and GitHub honours `working-directory` wherever
+// it sits in the step, so this scans the WHOLE step rather than stopping at
+// `run: |`. Stopping there was a real miss: moving the key below the run block
+// is behaviour-identical and used to turn the suite red.
+//
+// The run block's own body is skipped by indentation, because a script line
+// could say `working-directory:` in a comment and must not be read as the
+// step's.
 function extractStepWorkingDirectory(stepName) {
   const lines = actionYml.split('\n');
   const stepAt = lines.findIndex((l) => l.trim() === `- name: ${stepName}`);
   if (stepAt === -1) throw new Error(`no step named ${stepName} in action.yml`);
+  const keyIndent = lines[stepAt].indexOf('- name:') + 2;
   for (let i = stepAt + 1; i < lines.length; i += 1) {
-    const trimmed = lines[i].trim();
-    if (trimmed.startsWith('- name:')) break;
-    if (trimmed === 'run: |') break;
-    const match = /^working-directory:\s*(.*)$/.exec(trimmed);
+    const line = lines[i];
+    if (line.trim().length === 0) continue;
+    const indent = line.length - line.trimStart().length;
+    // Dedented to or past the step marker: the next step, or the end.
+    if (indent < keyIndent) break;
+    // Deeper than the step's own keys: a run body or an env mapping.
+    if (indent > keyIndent) continue;
+    const match = /^working-directory:\s*(.*)$/.exec(line.trim());
     if (match) return normaliseScalar(match[1]);
   }
   return '';
@@ -540,6 +576,53 @@ describe('action.yml runs the installed scanner and nothing else', () => {
     expect(argv.split(/\s+/).some((a) => a.startsWith('/'))).toBe(true);
   });
 
+  test('refuses a sarif target that resolves through a symlink at any depth', () => {
+    // The head controls the filename and every directory on the way to it. The
+    // first version of this guard checked the leaf and its immediate parent,
+    // and a review walked past it with one more level of nesting: a `reports`
+    // symlink plus `reports/sub/out.sarif` wrote outside the workspace with
+    // the step exiting 0.
+    for (const [target, linkAt] of [
+      ['out.sarif', 'out.sarif'],
+      ['reports/out.sarif', 'reports'],
+      ['reports/sub/out.sarif', 'reports'],
+      ['a/b/c/out.sarif', 'a'],
+    ]) {
+      const runner = makeRunner({ 'sarif-output': target });
+      installStubScanner(runner, {});
+      const outside = path.join(runner.dir, 'outside-the-workspace');
+      mkdirSync(outside, { recursive: true });
+      const linkPath = path.join(runner.workspace, linkAt);
+      mkdirSync(path.dirname(linkPath), { recursive: true });
+      symlinkSync(outside, linkPath);
+
+      const outputFile = path.join(runner.dir, 'github-output');
+      writeFileSync(outputFile, '');
+      const scriptFile = path.join(runner.dir, 'step.sh');
+      writeFileSync(scriptFile, extractRunScript('Run dep-guard'));
+      let status = 0;
+      try {
+        execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', scriptFile], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          cwd: cwdForStep('Run dep-guard', runner.ctx),
+          env: {
+            PATH: `${runner.pathDir}:${process.env.PATH ?? ''}`,
+            GITHUB_WORKSPACE: runner.workspace,
+            GITHUB_OUTPUT: outputFile,
+            ...runner.env,
+          },
+        });
+      } catch (err) {
+        status = typeof err.status === 'number' ? err.status : -1;
+      }
+      expect([target, status]).not.toEqual([target, 0]);
+      // And nothing was written through the link, including by mkdir -p,
+      // which used to run before the check.
+      expect([target, readdirSync(outside)]).toEqual([target, []]);
+    }
+  });
+
   test('publishes no results file when the scan wrote nothing', () => {
     // dep-guard exits before writing SARIF when it could not run, and the
     // redirect has already created the target, so the file exists and is
@@ -637,19 +720,36 @@ describe('action.yml "Validate inputs", trust-base', () => {
     expect(run.stdout).toContain('must not write under .github/');
   });
 
-  test('refuses the `./` spellings that reach the same place', () => {
-    // The first version of the .github/ guard compared strings, so
-    // `./.github/x` walked straight past it and resolved to the same file.
+  test('accepts a `./` prefix on a path, which is ordinary Actions style', () => {
+    // The first attempt at closing the `./.github/` bypass refused any value
+    // containing `./`, which broke `path: ./src`: accepted by every earlier
+    // release, and a security upgrade that turns a green check red is one
+    // people back out of. The guards normalise now instead of refusing.
+    expect(runValidateWith({ path: './src' }).status).toBe(0);
+    expect(runValidateWith({ path: './' }).status).toBe(0);
+    expect(runValidateWith({ 'sarif-output': './out.sarif' }).status).toBe(0);
+  });
+
+  test('refuses every spelling of .github/ that reaches the same directory', () => {
+    // The guard compares strings, so every second name for that directory has
+    // to be normalised away before the comparison: a `./` prefix, an interior
+    // `/./`, a doubled slash, and -- because a macOS runner's filesystem is
+    // case-insensitive -- a different case.
     for (const spelling of [
+      '.github/workflows/out.sarif',
       './.github/workflows/out.sarif',
       './/.github/out.sarif',
-      'a/./b.sarif',
-      './out.sarif',
+      '.github/./out.sarif',
+      '.GitHub/workflows/out.sarif',
+      '.GITHUB/out.sarif',
+      './.GitHub/out.sarif',
     ]) {
       const run = runValidateWith({ 'sarif-output': spelling });
       expect([spelling, run.status]).not.toEqual([spelling, 0]);
+      expect(run.stdout).toContain('must not write under .github/');
     }
-    // And the plain form still works, so this did not just ban everything.
+    // And a path that merely starts with the same letters is not caught.
+    expect(runValidateWith({ 'sarif-output': '.githubbed/out.sarif' }).status).toBe(0);
     expect(runValidateWith({ 'sarif-output': 'out.sarif' }).status).toBe(0);
     expect(runValidateWith({ path: '.' }).status).toBe(0);
   });

@@ -9,8 +9,15 @@ inputs:
   version:
     description: |
       The exact version of `@vaultcompass/dep-guard` to install, such as
-      `0.6.0`. Validated against `^[0-9]+\.[0-9]+\.[0-9]+$`, and the default is
-      the version this action shipped with.
+      `0.6.0`. Validated against `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
+      and the default is the SCANNER version this action tag shipped with,
+      which is not always the same number as the tag: an action-only release
+      moves the tag and leaves the scanner where it is.
+
+      No leading zeros, which is what that pattern buys over three plain
+      `[0-9]+` groups. `01.2.3` and `0.6.00` are not semver, so npm does not
+      read them as versions at all and falls back to treating the spec as a
+      dist-tag, which is the family this input exists to refuse.
 
       THIS USED TO DEFAULT TO `latest`, AND USED TO ACCEPT DIST-TAGS. Both are
       refused now, for two different reasons.
@@ -36,11 +43,12 @@ inputs:
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
-      of `[A-Za-z0-9._/-]` and must not contain `..`, so it cannot escape
-      GITHUB_WORKSPACE. (The charset is checked with `+` plus a separate
-      length guard, never `{1,256}`: BSD regex sets RE_DUP_MAX to 255, so
-      `{1,256}` fails to compile on macOS and rejects every path including
-      `.`.)
+      of `[A-Za-z0-9._/-]`, must not contain `..`, and must not begin with `-`,
+      so it can neither escape GITHUB_WORKSPACE nor be read as an option by a
+      command it reaches. A `./` prefix is fine. (The charset is checked with
+      `+` plus a separate length guard, never `{1,256}`: BSD regex sets
+      RE_DUP_MAX to 255, so `{1,256}` fails to compile on macOS and rejects
+      every path including `.`.)
     required: false
     default: .
   online:
@@ -93,7 +101,17 @@ inputs:
   sarif-output:
     description: |
       Where to write the SARIF file, relative to the workspace root. Same
-      path rules as `path`.
+      path rules as `path`, and two more that exist because this input names
+      a file the action WRITES rather than one it reads.
+
+      It may not resolve under `.github/`, which holds the workflow file and
+      the CODEOWNERS entry that decide how this gate runs and who may change
+      them. Compared after normalising `./` segments and case, so `./.github/x`
+      and `.GitHub/x` are refused too.
+
+      It may not resolve through a symlink, at the file or at any directory on
+      the way to it. The head controls those, and a symlink there would send
+      the write outside the workspace.
     required: false
     default: dep-guard-results.sarif
   upload-sarif:
@@ -218,16 +236,6 @@ runs:
             printf '::error::dep-guard: `%s` must not contain `..`: %q\n' "${name}" "${value}"
             exit 1
           fi
-          # ONE SPELLING PER LOCATION. A `.` path segment is a second name for
-          # the same file, and every guard below this one compares STRINGS: the
-          # `.github/` refusal matched `.github/x` and not `./.github/x`, which
-          # resolves to exactly the same place. Refusing the redundant spelling
-          # is simpler than teaching each guard to normalise, and it cannot
-          # drift out of step with them the way a second normaliser would.
-          if [[ "${value}" == *"./"* ]]; then
-            printf '::error::dep-guard: `%s` must not contain a `.` path segment; write the path without it: %q\n' "${name}" "${value}"
-            exit 1
-          fi
           if [[ "${value}" == /* ]]; then
             printf '::error::dep-guard: `%s` must be relative to the workspace: %q\n' "${name}" "${value}"
             exit 1
@@ -246,11 +254,43 @@ runs:
         validate_path "path" "${DG_PATH}"
         validate_path "sarif-output" "${DG_SARIF_OUTPUT}"
 
+        # NORMALISE FOR COMPARISON, do not refuse the spelling.
+        #
+        # A `.` path segment is a second name for the same file, so a guard
+        # that compares strings can be walked past with `./`. The first attempt
+        # at this refused any value containing `./` outright, which was wrong
+        # in a way that would have broken working repositories: `path: ./src`
+        # is ordinary Actions style, it was accepted by every earlier release,
+        # and a security upgrade that turns a green check red is an upgrade
+        # people back out of. Normalising costs the same and breaks nobody.
+        #
+        # Lowercased as well, because a macOS runner's filesystem is
+        # case-insensitive by default: `.GitHub/x` and `.github/x` are the same
+        # directory there, and a case-sensitive comparison sees two strings.
+        # Same reasoning as the `[Oo][Ff][Ff]` match further down.
+        # To a FIXED POINT, because the rewrites feed each other and applying
+        # them once each in a fixed order leaves holes. Stripping a leading
+        # `./` from `.//.github/x` yields `/.github/x`, which then matches
+        # neither `.github` nor `.github/*` and sailed past this guard: the
+        # test for it was written first and caught the ordering bug.
+        normalise_path() {
+          local value="$1"
+          local previous=""
+          while [[ "${value}" != "${previous}" ]]; do
+            previous="${value}"
+            value="${value//\/\//\/}"
+            value="${value//\/.\//\/}"
+            value="${value#./}"
+          done
+          printf '%s' "${value,,}"
+        }
+
         # `.github/` holds the workflow file and the CODEOWNERS entry that
         # decide how this gate runs and who may change it. A SARIF written
         # there is one upload, commit or artifact step away from landing inside
         # the path a reviewer is protecting.
-        if [[ "${DG_SARIF_OUTPUT}" == ".github" || "${DG_SARIF_OUTPUT}" == ".github/"* ]]; then
+        DG_SARIF_NORMALISED="$(normalise_path "${DG_SARIF_OUTPUT}")"
+        if [[ "${DG_SARIF_NORMALISED}" == ".github" || "${DG_SARIF_NORMALISED}" == ".github/"* ]]; then
           printf '::error::dep-guard: `sarif-output` must not write under .github/: %q\n' "${DG_SARIF_OUTPUT}"
           printf '::error::That directory holds the workflow file and the CODEOWNERS entry that decide how this gate runs. Write the SARIF somewhere else.\n'
           exit 1
@@ -389,20 +429,35 @@ runs:
         ROOT="${GITHUB_WORKSPACE}"
         OUT="${ROOT}/${DG_SARIF_OUTPUT}"
         RESULTS_FILE=""
-        mkdir -p "$(dirname "${OUT}")"
 
         # A symlink is not covered by the `..` and leading-slash rules, which
-        # constrain the STRING. The head controls the default filename, so it
-        # can commit a symlink there pointing anywhere the runner can write,
-        # and the redirect below would follow it. That cannot change this run's
-        # verdict -- the scan has not happened yet and the SARIF is written
-        # after it -- but it can clobber a file a later step in the caller's
-        # workflow reads. Refused rather than followed.
-        if [[ -L "${OUT}" || -L "$(dirname "${OUT}")" ]]; then
-          printf '::error::dep-guard: `sarif-output` resolves through a symlink, which would write outside the path it names: %q\n' "${DG_SARIF_OUTPUT}"
-          printf '::error::Remove the symlink from the repository, or point sarif-output somewhere else.\n'
-          exit 1
-        fi
+        # constrain the STRING. The head controls the default filename and
+        # every directory on the way to it, so it can commit a symlink
+        # anywhere along that path pointing outside the workspace, and the
+        # redirect below would follow it. That cannot change this run's verdict
+        # -- the scan has not happened yet and the SARIF is written after it --
+        # but it can clobber a file a later step in the caller's workflow reads.
+        #
+        # EVERY COMPONENT, not just the leaf and its parent. The first version
+        # of this guard checked `${OUT}` and `dirname ${OUT}`, which a review
+        # walked past with one more level of nesting: a `reports` symlink and a
+        # `reports/sub/out.sarif` target wrote outside the workspace with the
+        # step exiting 0.
+        #
+        # BEFORE `mkdir -p`, not after. The first version ran the check second,
+        # so a refused run had already created directories through the
+        # attacker's symlink on its way to refusing.
+        CURSOR="${OUT}"
+        while [[ "${CURSOR}" != "${ROOT}" && "${CURSOR}" != "/" ]]; do
+          if [[ -L "${CURSOR}" ]]; then
+            printf '::error::dep-guard: `sarif-output` resolves through a symlink at %q, which would write outside the path it names: %q\n' "${CURSOR}" "${DG_SARIF_OUTPUT}"
+            printf '::error::Remove the symlink from the repository, or point sarif-output somewhere else.\n'
+            exit 1
+          fi
+          CURSOR="$(dirname "${CURSOR}")"
+        done
+
+        mkdir -p "$(dirname "${OUT}")"
 
         # ABSOLUTE, built from the workspace. This step runs from the runner
         # temp rather than from the checkout, so a relative scan path would
