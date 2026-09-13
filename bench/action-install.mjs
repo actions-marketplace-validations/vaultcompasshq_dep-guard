@@ -79,9 +79,25 @@ const PRE_FIX_REF = 'v0.6.0';
 // it is recorded as status -1, which never matches a baseline.
 const STEP_TIMEOUT_MS = 180_000;
 
+// A second, OUTER bound, on top of the per-step one above. STEP_TIMEOUT_MS
+// only bounds one step's own child process; it does nothing about a hang
+// anywhere else in the harness itself -- a registry whose close() never
+// settles, a git or pack invocation with no timeout of its own, or a bug in
+// the loop across cases. Six real cases have finished in well under a minute
+// on an unloaded machine; ten minutes is generous enough not to fire on a
+// slow or loaded one while still turning "the harness hung" into a failed run
+// with a message, rather than a CI job silently eating the rest of its own
+// timeout.
+const RUN_TIMEOUT_MS = 10 * 60_000;
+
 const USAGE = `Usage: node bench/action-install.mjs [options]
 
-  --action-file <path>  the action.yml to run (default: this worktree's)
+  --action-file <path>  the action.yml to run (default: this worktree's).
+                         Every case is then labelled "given" instead of
+                         "current" / "v0.6.0", so combined with --compare it
+                         always reports drift against the recorded baseline --
+                         use it for a one-off look at another action.yml, not
+                         for comparing against the baseline.
   --compare             compare against the recorded baseline, exit 1 on drift
   --write-baseline      record this run as the baseline
   --json                write the run to stdout as JSON
@@ -228,41 +244,66 @@ function parseOutputs(file) {
 // that the real scanner emits its own version and a full rule catalogue and,
 // on this fixture, two results; a stand-in that has to fake a clean run emits
 // none of that.
+//
+// `hasRuleCatalogue` is recorded as a boolean, not the exact rule count: the
+// count moves whenever a rule is added or removed from the real scanner, for
+// reasons that have nothing to do with the install boundary this harness
+// exists to pin, and an exact-count baseline would fail the compare on every
+// such change. Whether the catalogue is non-empty is what tells a real
+// scanner from a stand-in; the exact size is not this harness's business.
+// `ruleIds` is likewise not recorded for a real-scanner result, for the same
+// reason (the corpus and rule set can rename or add a finding without the
+// install boundary having moved at all); it stays available here only for a
+// caller that wants to inspect one run, and the baseline keeps it only for
+// the stand-in cases, where it must always be empty.
 function classifySarif(file) {
-  if (!existsSync(file)) return { kind: 'absent', ruleIds: [], ruleCatalogue: 0 };
+  if (!existsSync(file)) return { kind: 'absent', ruleIds: [], hasRuleCatalogue: false, driverVersion: null };
   const text = readFileSync(file, 'utf8');
-  if (text.trim().length === 0) return { kind: 'empty', ruleIds: [], ruleCatalogue: 0 };
+  if (text.trim().length === 0) return { kind: 'empty', ruleIds: [], hasRuleCatalogue: false, driverVersion: null };
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { kind: 'unparseable', ruleIds: [], ruleCatalogue: 0 };
+    return { kind: 'unparseable', ruleIds: [], hasRuleCatalogue: false, driverVersion: null };
   }
   const run = parsed?.runs?.[0];
   const driver = run?.tool?.driver ?? {};
   const ruleIds = (run?.results ?? []).map((r) => r.ruleId).sort();
-  const ruleCatalogue = (driver.rules ?? []).length;
+  const ruleCatalogueCount = (driver.rules ?? []).length;
+  const driverVersion = typeof driver.version === 'string' ? driver.version : null;
   return {
-    kind: typeof driver.version === 'string' && ruleCatalogue > 0 ? 'real-scanner' : 'stand-in',
+    kind: driverVersion !== null && ruleCatalogueCount > 0 ? 'real-scanner' : 'stand-in',
     ruleIds,
-    ruleCatalogue,
+    hasRuleCatalogue: ruleCatalogueCount > 0,
+    driverVersion,
   };
 }
 
-// Whether the scanner that the install step left behind is the one under the
-// runner temp, checked by reading the manifest npm wrote rather than by
-// trusting the path the run step was told to call.
+// Whether the scanner that the install step left behind is present, and at
+// what version, checked by reading the manifest npm wrote rather than by
+// trusting the path the run step was told to call. It used to also report
+// `underRunnerPrefix`, which was a tautology: `manifestPath` is built by
+// joining `prefix` onto a fixed suffix, so it starts with `prefix` by
+// construction and the check could never observe anything else. What is
+// actually observed -- the SARIF's own `driver.version` (see classifySarif)
+// and the evaluated `DG_BIN` path relative to `RUNNER_TEMP` (see runCase) --
+// replaces it as direct evidence of which binary produced the result.
 function inspectInstalledScanner(prefix) {
   const manifestPath = path.join(prefix, 'lib', 'node_modules', '@vaultcompass', 'dep-guard', 'package.json');
   if (!existsSync(manifestPath)) {
-    return { present: false, underRunnerPrefix: false, version: null };
+    return { present: false, version: null };
   }
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  return {
-    present: true,
-    underRunnerPrefix: manifestPath.startsWith(`${prefix}${path.sep}`),
-    version: manifest.version ?? null,
-  };
+  return { present: true, version: manifest.version ?? null };
+}
+
+// Collapses a tarball request path down to the package-identity path
+// alongside it -- `/@scope/name/-/name-1.2.3.tgz` to `/@scope/name` -- so the
+// legitimate registry's recorded paths name which packages were fetched
+// without pinning the exact version each was fetched at. That version is not
+// lost: it is already recorded once, precisely, in installedScanner.version.
+function packageNamePaths(paths) {
+  return [...new Set(paths.map((p) => p.replace(/\/-\/[^/]+\.tgz$/, '')))].sort();
 }
 
 const HOSTILE_REGISTRY_MARKER = 'HOSTILE-REGISTRY-COPY-RAN';
@@ -289,10 +330,19 @@ async function runCase({ caseId, actionFile, scenario, packages, version, root, 
     marker: HOSTILE_REGISTRY_MARKER,
   });
 
-  const legit = await startRegistry({ label: 'legit', packages: packages.all });
-  const evil = await startRegistry({ label: 'evil', packages: [hostile] });
-
+  // Both created INSIDE the try, and referenced through variables the finally
+  // block checks before closing: startRegistry can throw (a bind failure, an
+  // exhausted ephemeral port range), and if the second call threw after the
+  // first had already succeeded, closing only ran for whichever registry a
+  // caller happened to hold a reference to. Declaring both above the try and
+  // creating them inside it means a throw from either still reaches the
+  // finally block with whichever one did start.
+  let legit;
+  let evil;
   try {
+    legit = await startRegistry({ label: 'legit', packages: packages.all });
+    evil = await startRegistry({ label: 'evil', packages: [hostile] });
+
     const workspace = buildCheckout({
       dir: path.join(workDir, 'workspace'),
       version,
@@ -393,11 +443,15 @@ async function runCase({ caseId, actionFile, scenario, packages, version, root, 
       steps.install = { present: false, status: null };
     }
 
+    // Captured separately from the spread below, because its own DG_BIN entry
+    // (present on the fixed action, absent on v0.6.0, which calls npx inline)
+    // is itself evidence recorded in the result: see `dgBin` below.
+    const runStepEnv = action.evaluateStepEnv(RUN_STEP, ctx);
     const run = await runStepScript({
       action,
       stepName: RUN_STEP,
       ctx,
-      env: { ...runnerEnv, ...action.evaluateStepEnv(RUN_STEP, ctx) },
+      env: { ...runnerEnv, ...runStepEnv },
       workDir,
       label: 'run',
     });
@@ -406,6 +460,12 @@ async function runCase({ caseId, actionFile, scenario, packages, version, root, 
     const outputs = parseOutputs(outputFile);
     const sarif = classifySarif(path.join(workspace, ctx.inputs['sarif-output']));
     const installed = inspectInstalledScanner(path.join(runnerTemp, 'dep-guard-action'));
+    // Direct evidence of which binary the run step was told to call, relative
+    // to runner.temp so the value is stable across runs (the absolute path
+    // moves with the per-run temp directory; the relative one does not). null
+    // on v0.6.0, which has no DG_BIN at all -- that absence is itself the
+    // point, not a gap in the recording.
+    const dgBin = typeof runStepEnv.DG_BIN === 'string' ? path.relative(runnerTemp, runStepEnv.DG_BIN) : null;
 
     const markers = {
       hostileRegistryCopyRan: existsSync(hostileMarker),
@@ -436,12 +496,32 @@ async function runCase({ caseId, actionFile, scenario, packages, version, root, 
           requestCount: evil.requests.length,
           paths: [...new Set(evil.paths())].sort(),
         },
+        // Package identities, not tarball filenames: a tarball path carries
+        // the version, and this registry is contacted for the CLI, core,
+        // commander and yaml alike, so a routine dependency bump (or the
+        // scanner's own version bump) would otherwise fail the compare for a
+        // reason unrelated to the install boundary. Which packages were
+        // fetched is the fact this harness needs; the exact version each was
+        // fetched at is already recorded once, in installedScanner.version.
         legitRegistry: {
           contacted: legit.requests.length > 0,
-          paths: [...new Set(legit.paths())].sort(),
+          paths: packageNamePaths(legit.paths()),
         },
-        installedScanner: installed,
-        sarif: { kind: sarif.kind, ruleIds: sarif.ruleIds, ruleCatalogue: sarif.ruleCatalogue },
+        installedScanner: { ...installed, dgBin },
+        sarif: {
+          kind: sarif.kind,
+          // A boolean, not the exact rule count: the count moves whenever a
+          // rule is added to or removed from the real scanner, which this
+          // harness has no opinion on. Non-empty vs. empty is what tells a
+          // real scanner from a stand-in.
+          ruleCatalogue: sarif.hasRuleCatalogue,
+          driverVersion: sarif.driverVersion,
+          // Recorded only off the negative control, where it must always be
+          // empty (the stand-in never reports a finding); dropped for a real
+          // scanner result, whose exact rule ids move with the corpus and the
+          // rule set for reasons unrelated to the install boundary.
+          ...(sarif.kind !== 'real-scanner' ? { ruleIds: sarif.ruleIds } : {}),
+        },
         gate: {
           // What the report step re-raises, so this is the check's colour: 0
           // green, 1 blocking findings, 2 could not run. The fixture's head
@@ -453,8 +533,11 @@ async function runCase({ caseId, actionFile, scenario, packages, version, root, 
       },
     };
   } finally {
-    await evil.close();
-    await legit.close();
+    // Guarded: a throw before the second startRegistry call means `evil` was
+    // never assigned, and closing an undefined registry is not the recovery
+    // this finally block exists to provide.
+    if (evil) await evil.close();
+    if (legit) await legit.close();
   }
 }
 
@@ -474,6 +557,17 @@ async function main() {
 
   const startedAt = Date.now();
   const root = mkdtempSync(path.join(tmpdir(), 'dep-guard-action-dogfood-'));
+  // The outer bound described where RUN_TIMEOUT_MS is declared. unref() so
+  // this timer is never, on its own, a reason the process stays alive on the
+  // fast path; it is cleared in the finally block below either way.
+  const watchdog = setTimeout(() => {
+    process.stderr.write(
+      `action-install: exceeded the overall run timeout of ${RUN_TIMEOUT_MS}ms; ` +
+        'forcing exit rather than let a hung harness run out its caller\'s own timeout\n'
+    );
+    process.exit(2);
+  }, RUN_TIMEOUT_MS);
+  watchdog.unref();
   try {
     log('packing this worktree as the registry would serve it');
     const packages = packRealPackages({ repoRoot: REPO_ROOT, workDir: root });
@@ -535,6 +629,13 @@ async function main() {
 
     process.stdout.write(`${formatTable(cases)}\n`);
     log(`\n${cases.length} case(s) in ${Math.round((Date.now() - startedAt) / 1000)}s`);
+    if (options.actionFile !== null) {
+      log(
+        '\nnote: --action-file relabels every case as "given", so --compare will report every ' +
+          'baseline case as not-run and every case here as unbaselined -- this mode is for a ' +
+          'one-off look at another action.yml, not for comparing against the recorded baseline.'
+      );
+    }
 
     if (options.writeBaseline) {
       writeFileSync(BASELINE, `${JSON.stringify(runRecord, null, 2)}\n`);
@@ -557,6 +658,7 @@ async function main() {
       process.stdout.write(`${JSON.stringify(runRecord, null, 2)}\n`);
     }
   } finally {
+    clearTimeout(watchdog);
     if (options.keep) {
       log(`work directories left at ${root}`);
     } else {

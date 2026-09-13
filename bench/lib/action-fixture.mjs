@@ -19,6 +19,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -107,11 +108,20 @@ function manifestAt(dir) {
 // generated data that a development checkout does not have, and without it the
 // installed scanner exits 2 with `corpus-missing` before it reads anything.
 // That is a failure for a reason this harness is not about, and it would mask
-// the difference between the real scanner and a hostile one. The fifty-name
-// development fixture is copied in when a real built corpus is absent. Copying
-// rather than writing into packages/core keeps the worktree clean: a harness
-// that mutates the tree it is packing leaves a mess behind when it is
-// interrupted.
+// the difference between the real scanner and a hostile one. Copying rather
+// than writing into packages/core keeps the worktree clean: a harness that
+// mutates the tree it is packing leaves a mess behind when it is interrupted.
+//
+// THE FIXTURE CORPUS IS FORCED, not merely defaulted in when a built one is
+// absent. This harness's baseline is a claim about the ACTION's install
+// boundary -- which program answered, which registry was contacted -- not
+// about corpus content, and a real corpus varies by build date and by
+// whatever `pnpm corpus:build` last produced on this machine. Preferring a
+// real corpus when present would make the baseline's findings (and this
+// harness's `--compare`) depend on whether the machine happens to have run
+// that build, which is exactly the kind of environment-dependence a fixture
+// exists to remove. Every run gets the same fifty-name development fixture,
+// whether or not a real corpus sits at `packages/core/data/corpus`.
 export function packRealPackages({ repoRoot, workDir }) {
   const packDir = path.join(workDir, 'real-packs');
   mkdirSync(packDir, { recursive: true });
@@ -128,9 +138,10 @@ export function packRealPackages({ repoRoot, workDir }) {
     filter: (source) => path.basename(source) !== 'node_modules',
   });
   const stagedCorpus = path.join(coreStage, 'data', 'corpus');
-  if (!existsSync(stagedCorpus)) {
-    cpSync(path.join(coreSrc, 'fixtures', 'corpus'), stagedCorpus, { recursive: true });
-  }
+  // Unconditional: whatever the cpSync above staged from the worktree (a real
+  // built corpus, if this machine has one) is replaced, not merely backed up.
+  rmSync(stagedCorpus, { recursive: true, force: true });
+  cpSync(path.join(coreSrc, 'fixtures', 'corpus'), stagedCorpus, { recursive: true });
 
   execFileSync('pnpm', ['--dir', coreStage, 'pack', '--pack-destination', packDir], {
     stdio: ['ignore', 'pipe', 'pipe'],

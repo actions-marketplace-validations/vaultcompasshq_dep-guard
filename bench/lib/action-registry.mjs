@@ -100,6 +100,10 @@ export async function startRegistry({ label, packages }) {
     server.once('error', reject);
     server.listen(0, '127.0.0.1', resolve);
   });
+  // Never a reason on its own for the process to stay alive. Every run closes
+  // both servers explicitly before exiting, but a bug that skips that must
+  // not turn into a hung harness on top of whatever it already got wrong.
+  server.unref();
   const { port } = server.address();
   const origin = `http://127.0.0.1:${port}`;
 
@@ -132,9 +136,27 @@ export async function startRegistry({ label, packages }) {
     // the port is in `origin` and changes every time, and npm's header set is
     // not this harness's business.
     paths: () => requests.map((entry) => entry.path),
+    // Bounded, and not left to npm's sockets to decide when. `close()` alone
+    // only resolves once every connection the OS still has open for this
+    // server ends on its own, and a keep-alive socket npm never tore down is
+    // exactly the kind of leak that has hung this harness before. A timeout
+    // gives up on waiting rather than hanging the whole run over one socket,
+    // and closeAllConnections() (present on every Node this package targets)
+    // is asked to end them immediately rather than waited on.
     close: () =>
       new Promise((resolve) => {
-        server.close(() => resolve());
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(finish, 2_000);
+        server.close(finish);
+        if (typeof server.closeAllConnections === 'function') {
+          server.closeAllConnections();
+        }
       }),
   };
 }

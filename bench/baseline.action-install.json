@@ -31,26 +31,19 @@
           "paths": [
             "/@vaultcompass/dep-guard",
             "/@vaultcompass/dep-guard-core",
-            "/@vaultcompass/dep-guard-core/-/dep-guard-core-0.6.0.tgz",
-            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz",
             "/commander",
-            "/commander/-/commander-12.1.0.tgz",
-            "/yaml",
-            "/yaml/-/yaml-2.9.0.tgz"
+            "/yaml"
           ]
         },
         "installedScanner": {
           "present": true,
-          "underRunnerPrefix": true,
-          "version": "0.6.0"
+          "version": "0.6.0",
+          "dgBin": "dep-guard-action/bin/dep-guard"
         },
         "sarif": {
           "kind": "real-scanner",
-          "ruleIds": [
-            "dep-guard/typosquat",
-            "dep-guard/unknown-package"
-          ],
-          "ruleCatalogue": 7
+          "ruleCatalogue": true,
+          "driverVersion": "0.6.0"
         },
         "gate": {
           "exitCode": "1",
@@ -87,26 +80,19 @@
           "paths": [
             "/@vaultcompass/dep-guard",
             "/@vaultcompass/dep-guard-core",
-            "/@vaultcompass/dep-guard-core/-/dep-guard-core-0.6.0.tgz",
-            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz",
             "/commander",
-            "/commander/-/commander-12.1.0.tgz",
-            "/yaml",
-            "/yaml/-/yaml-2.9.0.tgz"
+            "/yaml"
           ]
         },
         "installedScanner": {
           "present": true,
-          "underRunnerPrefix": true,
-          "version": "0.6.0"
+          "version": "0.6.0",
+          "dgBin": "dep-guard-action/bin/dep-guard"
         },
         "sarif": {
           "kind": "real-scanner",
-          "ruleIds": [
-            "dep-guard/typosquat",
-            "dep-guard/unknown-package"
-          ],
-          "ruleCatalogue": 7
+          "ruleCatalogue": true,
+          "driverVersion": "0.6.0"
         },
         "gate": {
           "exitCode": "1",
@@ -143,26 +129,19 @@
           "paths": [
             "/@vaultcompass/dep-guard",
             "/@vaultcompass/dep-guard-core",
-            "/@vaultcompass/dep-guard-core/-/dep-guard-core-0.6.0.tgz",
-            "/@vaultcompass/dep-guard/-/dep-guard-0.6.0.tgz",
             "/commander",
-            "/commander/-/commander-12.1.0.tgz",
-            "/yaml",
-            "/yaml/-/yaml-2.9.0.tgz"
+            "/yaml"
           ]
         },
         "installedScanner": {
           "present": true,
-          "underRunnerPrefix": true,
-          "version": "0.6.0"
+          "version": "0.6.0",
+          "dgBin": "dep-guard-action/bin/dep-guard"
         },
         "sarif": {
           "kind": "real-scanner",
-          "ruleIds": [
-            "dep-guard/typosquat",
-            "dep-guard/unknown-package"
-          ],
-          "ruleCatalogue": 7
+          "ruleCatalogue": true,
+          "driverVersion": "0.6.0"
         },
         "gate": {
           "exitCode": "1",
@@ -200,13 +179,14 @@
         },
         "installedScanner": {
           "present": false,
-          "underRunnerPrefix": false,
-          "version": null
+          "version": null,
+          "dgBin": null
         },
         "sarif": {
           "kind": "stand-in",
-          "ruleIds": [],
-          "ruleCatalogue": 0
+          "ruleCatalogue": false,
+          "driverVersion": null,
+          "ruleIds": []
         },
         "gate": {
           "exitCode": "0",
@@ -247,13 +227,14 @@
         },
         "installedScanner": {
           "present": false,
-          "underRunnerPrefix": false,
-          "version": null
+          "version": null,
+          "dgBin": null
         },
         "sarif": {
           "kind": "stand-in",
-          "ruleIds": [],
-          "ruleCatalogue": 0
+          "ruleCatalogue": false,
+          "driverVersion": null,
+          "ruleIds": []
         },
         "gate": {
           "exitCode": "0",
@@ -294,13 +275,14 @@
         },
         "installedScanner": {
           "present": false,
-          "underRunnerPrefix": false,
-          "version": null
+          "version": null,
+          "dgBin": null
         },
         "sarif": {
           "kind": "stand-in",
-          "ruleIds": [],
-          "ruleCatalogue": 0
+          "ruleCatalogue": false,
+          "driverVersion": null,
+          "ruleIds": []
         },
         "gate": {
           "exitCode": "0",

@@ -1850,9 +1850,10 @@ chose has moved the decision, not removed it.
 
 The Action used to run `npx --yes "@vaultcompass/dep-guard@${DG_VERSION}"`
 with the checkout as its working directory. Two routes followed from that.
-Both were exercised against real npm during the investigation, and **both are
-now pinned**: `bench/action-install.mjs` runs action.yml's own install and run
-steps against real npm and two local, ephemeral-port registries (no network),
+Both were exercised against real npm during the investigation, and **the
+harness now pins the two attacks' outcomes**: `bench/action-install.mjs` runs
+action.yml's own install and run steps against real npm and two local,
+ephemeral-port registries (no network),
 once for this worktree's current `action.yml` and once for the pre-fix
 `action.yml` read out of the `v0.6.0` tag, across three checkout shapes -- a
 committed `.npmrc` alone, the scoped-key variant, and a planted `node_modules`
@@ -1883,6 +1884,20 @@ with the head's `.npmrc`, manifest and lockfile under its cwd. Global mode
 is documented not to read project config, which is a property of a version
 of npm rather than of this repository, and is not what the boundary should
 rest on.
+
+The install step's own `working-directory` line is DEFENCE IN DEPTH that
+`bench/action-install.mjs` cannot observe directly, and that is worth stating
+plainly rather than leaving a gap the harness's own coverage would seem to
+close. `npm install -g` ignores project-level config regardless of its cwd,
+so real npm behaves identically whether that step's `working-directory`
+points at the runner temp or at the workspace root -- the real-npm harness has
+nothing to compare, because there is no observable difference for it to
+catch. It is the STUBBED suite, `scripts/tests/action-run-script.test.mjs`
+("starts npm outside the checkout, so a committed `.npmrc` is never its cwd"),
+whose stub records its own cwd and pins this particular line. The two suites
+divide the claim rather than duplicate it: the stub proves where npm is told
+to start; the real-npm harness proves what real npm does once it is asked to
+run.
 
 **The scan path passed to that binary must be ABSOLUTE, and the two halves
 are inseparable.** Run from the runner temp with a relative `.`, dep-guard
@@ -1918,11 +1933,25 @@ one or the other, as of 0.6.1:
 - `README.md`, the prose about which scanner a tag installs (both numbers)
 - `CHANGELOG.md`, the release heading and any migration line naming a tag
 - `package.json` and each `packages/*/package.json` (the scanner version)
-- `bench/baseline.action-install.json`'s `scannerVersion` field and its
-  `current--*` case ids' `installedScanner.version`, which record the version
-  the dogfood harness packed and installed; a scanner bump without a
-  `pnpm bench:action-install:update-baseline` leaves this baseline out of step
-  with the number everywhere else on this list, and `--compare` catches it.
+- `bench/baseline.action-install.json`. Its top-level `scannerVersion` field
+  is NOT itself what `--compare` checks: `compareRuns` walks each recorded
+  case's `observed` object only, so a stale top-level value would sit there
+  uncompared and unnoticed. What actually catches a scanner bump is inside
+  the cases instead: the `current--*` cases' `installedScanner.version` (the
+  version npm actually installed), and the two negative-control cases that
+  reach the hostile registry (`npmrc-only` and `scoped-npmrc-only`, at the
+  `v0.6.0` revision) whose `evilRegistry.paths` still name the hostile
+  stand-in's tarball at its packed version -- the third negative-control
+  case, `npmrc-and-planted-copy`, never contacts a registry at all, so it
+  carries no version either way. `legitRegistry.paths` no longer carries the
+  version at all: it is recorded as package identities rather than tarball
+  filenames on purpose (see `bench/action-install.mjs`'s `packageNamePaths`),
+  so an ordinary commander or yaml bump stops failing the compare for a
+  reason unrelated to the scanner's own version. A scanner bump without a
+  `pnpm bench:action-install:update-baseline` still leaves this baseline out
+  of step with the number everywhere else on this list, and `--compare` still
+  catches it, just through these per-case fields rather than through the
+  field at the top of the file.
 
 **The release workflow now knows both shapes, and the tag has to earn the
 second one.** `.github/workflows/release.yml` used to assert that a pushed tag
