@@ -1911,6 +1911,29 @@ one or the other, as of 0.6.1:
 - `CHANGELOG.md`, the release heading and any migration line naming a tag
 - `package.json` and each `packages/*/package.json` (the scanner version)
 
+**The release workflow now knows both shapes, and the tag has to earn the
+second one.** `.github/workflows/release.yml` used to assert that a pushed tag
+read `v` plus the package version and fail otherwise, so the v0.6.1 tag push
+went red before install, build or publish and got no Release page at all. Its
+version step now calls `scripts/classify-release-tag.mjs` instead. A tag equal
+to `v` plus the package version is a package release and the run proceeds
+exactly as before. Any other tag is treated as an action-only release ONLY if
+all four of these hold, and fails with a message naming the one that did not:
+the tag is `v` plus exact semver (no prerelease, no build suffix, no leading
+zeros, the same shape `action.yml` validates its `version` input against); it
+is strictly greater than the package version by numeric ordering, so `v0.9.0`
+against packages at 0.10.0 is a mistake and not a forward move; both
+`@vaultcompass/dep-guard-core` and `@vaultcompass/dep-guard` are already on the
+npm registry at exactly the package version; and `action.yml`'s `version`
+default equals that same package version. On that path the run skips install,
+build, the code gates, the corpus walk and the publish, and cuts a Release
+whose body says nothing was published. The ancestry check -- the tagged commit
+must be on `main` -- applies to both kinds, because an action-only tag still
+moves the ref people run in `uses:`. The rules and the reasoning live in
+`scripts/lib/release-kind.mjs`; `scripts/tests/release-kind.test.mjs` covers
+them with the registry lookup injected, and also asserts that the workflow
+actually gates its publish-side steps on the answer.
+
 They are allowed to differ, and an action-only release is the normal reason:
 nothing in the scanner changed, so publishing a new scanner purely to keep two
 strings matching would burn a version through a one-way trusted-publisher

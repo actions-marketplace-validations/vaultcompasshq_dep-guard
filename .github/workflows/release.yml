@@ -7,6 +7,23 @@ name: Release
 # the same checks (pnpm build / pnpm typecheck / pnpm lint / pnpm test)
 # right before anything is published, in case main moved between the
 # merge and the tag.
+#
+# Two kinds of release come through here, decided by the "Decide the
+# release kind" step below:
+#
+#   * a PACKAGE release, where the tag reads "v" + the version both
+#     packages carry. Everything in this file runs.
+#   * an ACTION-ONLY release, where the tag moves past the scanner version
+#     and the packages stay where they are (v0.6.1 was the first). Nothing
+#     is published, so the re-verification above has nothing to protect:
+#     every build, test, corpus and publish step is skipped and the run
+#     only resolves the tag and cuts a GitHub Release. The code gates
+#     ci.yml already ran on the merge commit remain the gate for that
+#     commit, and the ~10-15 minute registry walk in "Build the shipped
+#     corpus" would be building a corpus nothing ships.
+#
+# docs/INVARIANTS.md, "The action tag and the scanner version are two
+# numbers", is the long version of why those are two numbers at all.
 
 on:
   push:
@@ -31,6 +48,11 @@ jobs:
       id-token: write
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
+      # "true" only for an action-only tag, and only after every condition
+      # in scripts/lib/release-kind.mjs held. Every step this run skips
+      # reads it, and so does the smoke-published job below, which has
+      # nothing to smoke test when nothing was published.
+      action_only: ${{ steps.kind.outputs.action_only }}
 
     steps:
     # Runs before checkout on purpose: GITHUB_REF and github.event_name are
@@ -48,8 +70,8 @@ jobs:
     # comment here used to imply: "git tag v0.1.0 <any-commit> && git push
     # --tags" fires this workflow from any commit, on or off main, with a
     # real tag and matching GitHub Release. See the ancestry check in
-    # "Assert core and cli versions match" below for how the tag path
-    # guards against that.
+    # "Decide the release kind, and refuse a tag that is neither" below for
+    # how the tag path guards against that.
     - name: Refuse workflow_dispatch from anywhere but main
       if: github.event_name == 'workflow_dispatch'
       run: |
@@ -77,9 +99,12 @@ jobs:
     # "Build the shipped corpus") -- on purpose. Every failure this step
     # catches is a human mistake made at tag time: a mistyped tag, a
     # version left unbumped, a tag pushed on the wrong commit. None of that
-    # depends on anything pnpm install, build, or test produce -- the
-    # script below only reads the two package.json files via "node -p" and
-    # talks to git directly. Catching the mistake after the corpus walk
+    # depends on anything pnpm install, build, or test produce -- the step
+    # below reads the two package.json files via "node -p", talks to git
+    # directly, and runs scripts/classify-release-tag.mjs, which uses node
+    # builtins only (no dependency of this repository is installed yet, and
+    # that script must keep it that way) plus, on the action-only path, two
+    # "npm view" lookups. Catching the mistake after the corpus walk
     # costs fifteen minutes and several hundred requests against a public
     # registry replica; catching it here costs about a minute. Running it
     # this early also makes the ancestry check below cheap to exercise
@@ -100,44 +125,65 @@ jobs:
     #      published in lockstep on purpose -- see the comment on the
     #      publish loop below for why a cli release without a matching
     #      core bump is not a smaller mistake, it is a silent one.
-    #   2. when this run is tag-triggered, the tag must read "v" + that
-    #      version. workflow_dispatch has no tag at all (GITHUB_REF_TYPE
-    #      is "branch"), so this half only applies to a tag push, and the
-    #      dispatch path is covered instead by the ref guard above.
+    #   2. when this run is tag-triggered, the tag must be one of the two
+    #      release shapes this repository has, and the step decides WHICH
+    #      -- that is the "action_only" output every later step reads.
+    #      A tag that reads "v" + the package version is a package
+    #      release and everything proceeds as it always has. Any other tag
+    #      is an action-only CANDIDATE, and is refused unless it is exact
+    #      semver, strictly greater than the package version by numeric
+    #      ordering, backed by both packages already being on the npm
+    #      registry at that package version, and matched by action.yml's
+    #      own version default. scripts/lib/release-kind.mjs holds those
+    #      rules and the reasoning for each; scripts/tests/
+    #      release-kind.test.mjs holds the cases, registry lookup and all,
+    #      which is why this is a script rather than four more lines of
+    #      bash here. This half only applies to a tag push --
+    #      workflow_dispatch has no tag at all (GITHUB_REF_TYPE is
+    #      "branch") and is covered instead by the ref guard above.
+    #
+    #      The old version of this step knew only the first shape and
+    #      hard-failed on everything else, so the v0.6.1 action-only tag
+    #      push went red here and never got a Release page. Admitting the
+    #      second shape must not weaken what the first one bought: a
+    #      mistyped or mis-pointed tag still publishes nothing and still
+    #      never describes an unpublished version in a Release.
     #   3. when this run is tag-triggered, the tagged commit must be an
     #      ancestor of origin/main. "git tag v0.1.0 <any-commit> && git push
     #      --tags" fires this workflow from any commit, on or off main; a
     #      tag on a side branch would otherwise walk straight into an OIDC
     #      trusted publish around branch protection, with a real tag and a
-    #      matching GitHub Release to show for it.
-    - name: Assert core and cli versions match each other, and the tag if there is one
+    #      matching GitHub Release to show for it. This applies to BOTH
+    #      kinds of release: an action-only tag publishes nothing, but it
+    #      still moves the ref people write in "uses:", which is the thing
+    #      actually running inside their workflows.
+    - name: Decide the release kind, and refuse a tag that is neither
+      id: kind
       run: |
         set -euo pipefail
+        CORE_NAME="$(node -p "require('./packages/core/package.json').name")"
         CORE_VERSION="$(node -p "require('./packages/core/package.json').version")"
+        CLI_NAME="$(node -p "require('./packages/cli/package.json').name")"
         CLI_VERSION="$(node -p "require('./packages/cli/package.json').version")"
 
         # GITHUB_REF_NAME is always set by Actions (a branch name on
         # workflow_dispatch, a tag name on a tag push), so a ${VAR:-fallback}
         # here would never actually trigger -- a dispatch run would read
         # "tag is main", which is not even true (a dispatch run has no tag
-        # at all). Read GITHUB_REF_TYPE instead of guessing from emptiness.
+        # at all). Read GITHUB_REF_TYPE instead of guessing from emptiness:
+        # --tag is passed only on a real tag push, and the script's answer
+        # for a run without one is always "package release".
+        #
+        # The script writes action_only and scanner_version to
+        # $GITHUB_OUTPUT itself, so nothing here parses its stdout.
         if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-          REF_DESCRIPTION="tag ${GITHUB_REF_NAME}"
-        else
-          REF_DESCRIPTION="branch ${GITHUB_REF_NAME} (not a tag push)"
-        fi
-
-        if [[ "${CORE_VERSION}" != "${CLI_VERSION}" ]]; then
-          echo "::error::Version lockstep broken: packages/core is at ${CORE_VERSION}, packages/cli is at ${CLI_VERSION}, ${REF_DESCRIPTION}. core and cli must always carry the same version. Refusing to publish."
-          exit 1
-        fi
-
-        if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-          EXPECTED_TAG="v${CORE_VERSION}"
-          if [[ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]]; then
-            echo "::error::Tag mismatch: pushed tag is ${GITHUB_REF_NAME}, but packages/core and packages/cli are both at version ${CORE_VERSION} (expected tag ${EXPECTED_TAG}). A mistyped tag would otherwise publish the wrong version irreversibly and describe it in a GitHub Release as though it matched. Refusing to publish."
-            exit 1
-          fi
+          node scripts/classify-release-tag.mjs \
+            --tag "${GITHUB_REF_NAME}" \
+            --core-name "${CORE_NAME}" \
+            --core-version "${CORE_VERSION}" \
+            --cli-name "${CLI_NAME}" \
+            --cli-version "${CLI_VERSION}" \
+            --action-yml action.yml
 
           # The checkout step above uses actions/checkout's default
           # fetch-depth (1), so this job's working copy holds only the
@@ -154,26 +200,47 @@ jobs:
           git fetch origin main:refs/remotes/origin/main
 
           if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
-            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not an ancestor of origin/main. A tag pushed at a commit off main would otherwise walk straight into an OIDC trusted publish around branch protection. Refusing to publish."
+            echo "::error::Tag ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not an ancestor of origin/main. A tag pushed at a commit off main would otherwise walk straight into an OIDC trusted publish around branch protection, and an action-only tag at such a commit would ship that commit's action.yml to everyone who pins the tag. Refusing to release."
             exit 1
           fi
+        else
+          node scripts/classify-release-tag.mjs \
+            --core-name "${CORE_NAME}" \
+            --core-version "${CORE_VERSION}" \
+            --cli-name "${CLI_NAME}" \
+            --cli-version "${CLI_VERSION}" \
+            --action-yml action.yml
         fi
 
-        echo "Version check passed: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME}"
+        echo "Release kind decided: core=${CORE_VERSION} cli=${CLI_VERSION} ref_type=${GITHUB_REF_TYPE} ref_name=${GITHUB_REF_NAME}"
 
+    # Everything from here down to "Publish to npm" exists to protect a
+    # publish, and an action-only release performs none -- so every one of
+    # those steps carries the same "not action_only" condition. The step
+    # above is what decides that, and it refuses any tag that is not
+    # demonstrably one of the two shapes, so this condition can never be
+    # reached by a tag nobody vetted. The code gates themselves are not
+    # being waived: ci.yml ran build, typecheck, lint and test on the
+    # merge commit, and the ancestry check above proved this tag points at
+    # a commit that is on main.
     - name: Install dependencies
+      if: steps.kind.outputs.action_only != 'true'
       run: pnpm install --frozen-lockfile
 
     - name: Build packages
+      if: steps.kind.outputs.action_only != 'true'
       run: pnpm build
 
     - name: Typecheck
+      if: steps.kind.outputs.action_only != 'true'
       run: pnpm typecheck
 
     - name: Lint (public repository hygiene guard)
+      if: steps.kind.outputs.action_only != 'true'
       run: pnpm lint
 
     - name: Run tests
+      if: steps.kind.outputs.action_only != 'true'
       run: pnpm test
 
     # MUST run after "Run tests", never before. packages/cli/tests/cli.test.ts
@@ -193,7 +260,13 @@ jobs:
     # closed, before anything is published, which is the correct direction:
     # a release with no corpus, or a corpus this build could not verify, is
     # worse than a delayed release.
+    #
+    # Skipped on an action-only release: the corpus this would build goes
+    # into a core tarball that release does not publish, so the walk would
+    # spend ten to fifteen minutes and several hundred requests against a
+    # public registry replica producing an artifact nothing ships.
     - name: Build the shipped corpus
+      if: steps.kind.outputs.action_only != 'true'
       run: node scripts/build-corpus.mjs --out packages/core/data/corpus
 
     # Refuses to publish a corpus that is not actually fit to ship -- see
@@ -203,6 +276,7 @@ jobs:
     # a known-popular name resolving as present). This is stricter than
     # what loadCorpus itself tolerates at read time, by design.
     - name: Check the corpus is fit to publish
+      if: steps.kind.outputs.action_only != 'true'
       run: node scripts/check-shippable-corpus.mjs packages/core/data/corpus
 
     # Packs packages/core the same way the "Publish to npm" step below will,
@@ -217,6 +291,7 @@ jobs:
     # directory. See scripts/check-corpus-packed.mjs for the command this
     # runs and how it was verified.
     - name: Check the corpus reaches the packed tarball
+      if: steps.kind.outputs.action_only != 'true'
       run: node scripts/check-corpus-packed.mjs
 
     # This is the only pre-publish step that executes the shipped artifact
@@ -243,6 +318,7 @@ jobs:
     # the local pin correctly -- no separate install-core-first step and
     # no registry lookup needed.
     - name: Install the packed tarballs and run the shipped binary
+      if: steps.kind.outputs.action_only != 'true'
       run: |
         set -euo pipefail
         PACK_DIR="$(mktemp -d)"
@@ -319,6 +395,7 @@ jobs:
     # needs a newer Node than this job runs. Mirrors vault-guard's
     # release.yml, the model for this workflow.
     - name: Upgrade npm for OIDC trusted publishing
+      if: steps.kind.outputs.action_only != 'true'
       run: npm install -g npm@11
 
     # dep-guard-cli depends on dep-guard-core via workspace:*, which pnpm
@@ -339,6 +416,7 @@ jobs:
     # together (see the lockstep assertion above). A burned version number
     # is never re-released -- it is superseded by the next one.
     - name: Publish to npm
+      if: steps.kind.outputs.action_only != 'true'
       run: |
         set -euo pipefail
         for dir in packages/core packages/cli; do
@@ -362,7 +440,15 @@ jobs:
           echo "tag=v$(node -p "require('./packages/cli/package.json').version")" >> "$GITHUB_OUTPUT"
         fi
 
+    # Two Release steps, one per release kind, rather than one step with a
+    # computed body. The body is the only difference between them, and it
+    # is the part that must not be wrong: "Published ... to npm" appears
+    # under exactly one condition, the same condition that let the publish
+    # step run at all, so an action-only release cannot announce a publish
+    # that did not happen. A single step with an interpolated body would
+    # put that claim one expression edit away from being unconditional.
     - name: Create GitHub Release
+      if: steps.kind.outputs.action_only != 'true'
       uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
       with:
         tag_name: ${{ steps.meta.outputs.tag }}
@@ -371,9 +457,35 @@ jobs:
         body: |
           Published `@vaultcompass/dep-guard` and `@vaultcompass/dep-guard-core` to npm.
 
+    # The action-only body. It has to answer the question a reader of this
+    # Release page actually has -- "the tag moved, so what am I getting?"
+    # -- which is a scanner version that did not move with it. See
+    # docs/INVARIANTS.md, "The action tag and the scanner version are two
+    # numbers".
+    - name: Create GitHub Release (action-only)
+      if: steps.kind.outputs.action_only == 'true'
+      uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+      with:
+        tag_name: ${{ steps.meta.outputs.tag }}
+        target_commitish: ${{ github.sha }}
+        generate_release_notes: true
+        body: |
+          Action-only release. `${{ steps.meta.outputs.tag }}` moves the composite action; the scanner it installs stays at `${{ steps.kind.outputs.scanner_version }}`, which was already on npm before this tag.
+
+          Nothing was published to npm by this release.
+
+          See CHANGELOG.md for what changed.
+
   smoke-published:
     name: Smoke test published CLI
     needs: release
+    # Nothing was published on an action-only release, so there is nothing
+    # here to smoke test: every command below installs
+    # @vaultcompass/dep-guard at the version derived from the tag, and on
+    # an action-only tag that version does not exist on the registry and
+    # never will. The job would wait out its twelve registry polls and
+    # then fail a release that did exactly what it was supposed to.
+    if: needs.release.outputs.action_only != 'true'
     runs-on: ubuntu-latest
     steps:
       # No checkout step: this job's whole point is to exercise ONLY what a
