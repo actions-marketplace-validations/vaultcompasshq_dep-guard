@@ -1836,3 +1836,103 @@ tarball-repointed, and the rest of the list in the `delta-new-lock-entries`
 diagnostic) never evaluate. Pre-existing in 0.5.0 and not introduced by
 pull-request mode; recorded here because the trust-boundary work is what
 made the gap legible.
+
+## The scanner is itself a control input, and comes from outside the tree
+
+The section above draws the line between a SUBJECT and a CONTROL INPUT and
+then lists the control inputs as files. That list was incomplete, and the
+missing entry is the largest one: **the program doing the scanning**. A gate
+that reads its config from the base branch and then runs a binary the head
+chose has moved the decision, not removed it.
+
+The Action used to run `npx --yes "@vaultcompass/dep-guard@${DG_VERSION}"`
+with the checkout as its working directory. Two routes followed from that.
+Both were exercised against real npm during the investigation, and **neither
+is pinned by anything in this repository**, which is a gap rather than an
+oversight worth leaving unsaid: the suite stubs npm, so it can prove the
+action no longer ASKS npm to run from the checkout, and cannot prove what npm
+would do if it did. Closing that needs a dogfood harness that runs real npm
+against a fixture tree and records a baseline a later run can diff, the way
+`validate:public-repos` does for scanning. Until then the two routes below are
+recorded reasoning plus a one-off measurement, not a regression test:
+
+- **A committed `.npmrc` repoints the registry.** npx in non-global mode
+  reads project config from its cwd, and `--yes` means no prompt. A pull
+  request adding one root file chooses which registry the scanner is
+  fetched from. Note that `.npmrc` was already on the control-input list
+  for its scope pins; this is a second, sharper reason it belongs there.
+- **An installed copy wins outright.** `npx pkg@version` run in a tree whose
+  `node_modules` already satisfies that spec runs the local copy and never
+  contacts the registry. The version pin degrades from a choice of program
+  to a satisfaction check on a package the head wrote, and any workflow with
+  an install step before the gate hands that over.
+
+**The rule: install the scanner from the registry into a prefix under the
+runner temp, start npm from the runner temp, and call the result by absolute
+path.** Not "install outside and run wherever": a composite step with no
+`working-directory` runs at the workspace root, so npm would still start
+with the head's `.npmrc`, manifest and lockfile under its cwd. Global mode
+is documented not to read project config, which is a property of a version
+of npm rather than of this repository, and is not what the boundary should
+rest on.
+
+**The scan path passed to that binary must be ABSOLUTE, and the two halves
+are inseparable.** Run from the runner temp with a relative `.`, dep-guard
+resolves the runner temp as the repository, fails to resolve the trust base,
+and exits 2 on every run, with a message telling the caller to fetch the
+base branch with `fetch-depth: 0`, which they already did. A permanently red
+required check explained by advice that cannot fix it. Ship both or neither.
+
+**The version input takes an exact version only**, and defaults to the
+SCANNER version the action tag shipped with, which is a different number from
+the tag whenever an action-only release happens. A dist-tag hands the choice
+of program to the registry on the morning of the run. A charset check is not
+enough on its own: npm's specifier parser reads a value beginning with `.` or
+ending in `.tgz` as a local path, so `.`, `..` and `payload.tgz` resolve
+against a directory instead of the registry, and a value that is not valid
+semver at all, such as `01.2.3` or `0.6.00`, falls back to being treated as a
+dist-tag.
+
+## The action tag and the scanner version are two numbers, and both get bumped
+
+0.6.1 was the first release where they came apart, and the release commit that
+created the split broke this rule inside itself: the README's copy-paste
+example still said `@v0.6.0` while the prose ten lines below told the reader
+to move to `@v0.6.1`. The one block anybody actually copies was the one
+handing them the pre-fix action. A reviewer caught it.
+
+**The rule: when either number moves, grep for BOTH.** The places that carry
+one or the other, as of 0.6.1:
+
+- `action.yml`, the `version` input's `default:` (the scanner version)
+- `action.yml`, the `version` input's description, which names an example
+- `README.md`, the `uses: vaultcompasshq/dep-guard@vX.Y.Z` example (the tag)
+- `README.md`, the prose about which scanner a tag installs (both numbers)
+- `CHANGELOG.md`, the release heading and any migration line naming a tag
+- `package.json` and each `packages/*/package.json` (the scanner version)
+
+They are allowed to differ, and an action-only release is the normal reason:
+nothing in the scanner changed, so publishing a new scanner purely to keep two
+strings matching would burn a version through a one-way trusted-publisher
+path. What is not allowed is a document telling a reader to pin one number
+while an example next to it pins the other.
+
+**What this does NOT cover**, and the comment in `action.yml` says so: a
+pull request can edit the workflow file, because a `pull_request` run uses
+the workflow as it is in the merge commit. Branch protection on the base
+branch with review required for `.github/workflows/**` is the control for
+that, and nothing the action does substitutes for it. The boundary here is
+against the TREE choosing its own judge, which is a smaller and achievable
+claim. The absolute binary path is likewise not total: the shim starts with
+`#!/usr/bin/env node`, so the interpreter is still a PATH lookup that a
+cooperating workflow can influence.
+
+**Testing this needs a harness that derives each step's environment and
+working directory from action.yml itself.** A harness with its own table of
+variables, or its own idea of the cwd, asserts a property of the harness: a
+review deleted the entire install step from a copy of `action.yml` and all
+25 tests passed, and removing `working-directory` from a step passed too.
+The suite now reads both from the file, and `DG_ACTION_FILE` points it at a
+mutated copy so any of this can be made to fail on demand. Both action test
+files honour that override; one of them not honouring it produced a green
+run against a weakened file.

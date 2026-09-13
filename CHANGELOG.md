@@ -10,6 +10,74 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-12
+
+**An action-only release. The tag moves; the npm packages do not.** Nothing in
+the scanner changed, so `@vaultcompass/dep-guard` stays at 0.6.0 on npm and the
+action's `version` default stays `0.6.0`, which is the scanner this action tag
+installs and was tested against.
+
+That makes the action tag and the scanner version two different numbers for the
+first time, and it is deliberate rather than an oversight:
+`vaultcompasshq/dep-guard@v0.6.1` installs `@vaultcompass/dep-guard@0.6.0`.
+Publishing an identical scanner as 0.7.0 so the two strings matched would burn a
+version number on a change that touches no scanning code, through a
+trusted-publisher path that is a one-way door.
+
+**Pinning `vaultcompasshq/dep-guard@v0.6.0` gets the OLD action**, the one that
+installs the scanner from inside the checkout. Move to `@v0.6.1`.
+
+### Security
+
+- **The Action installs the scanner from outside the tree it scans.** It ran
+  `npx` from inside the checkout, which put the choice of program inside the
+  tree under judgment by two routes. An `.npmrc` committed by the head
+  repoints the registry npx fetches from. A copy of the package already in the
+  head's `node_modules`, from the workflow's own earlier install step, is what
+  npx runs, with the version pin acting only as a satisfaction check on a
+  package the head wrote. Either one lets a pull request choose the program
+  that scans it, and the second needs no registry at all. The package is now
+  installed globally into a prefix under the runner temp, with npm started
+  from the runner temp rather than from the workspace, and called by absolute
+  path.
+
+  The scan path passed to that binary is now absolute, and the two halves are
+  not separable: run from the runner temp with a relative `.`, dep-guard
+  resolves the runner temp as the repository, fails to resolve the trust base,
+  and exits 2 on every run, blaming a `fetch-depth` the caller already set.
+
+### Changed
+
+- **`version` takes an exact version only, and defaults to the version the
+  action shipped with.** It accepted dist-tags and defaulted to `latest`. A
+  tag hands the choice of scanner to the registry on the morning of the run.
+  The old charset also accepted values npm reads as a PATH rather than a
+  version, `.`, `..` and `payload.tgz` among them. **A workflow relying on the
+  old `latest` default must pin an exact version.**
+- **Only 0 and 1 are verdicts.** Any other exit code from the run step,
+  including the 126 and 127 the shell produces when the binary is missing or
+  not executable, is reported as could-not-run and re-raised as 2 rather than
+  as blocking findings. An empty code, which is what a rejected input looks
+  like from the report step, is now also 2 rather than 1.
+- **`results-file` is published only when the SARIF is non-empty.** dep-guard
+  exits before writing anything when it could not run, and the redirect had
+  already created the target, so `upload-sarif` was handed a zero-byte file
+  and failed the job with a parse error that buried the real cause.
+- **Input validation.** No value may begin with a dash, rather than only the
+  ref. `trust-base: off` is refused in any capitalisation. A version with a
+  leading zero such as `01.2.3` is refused, because npm does not read it as a
+  version at all and falls back to treating the spec as a dist-tag.
+- **`sarif-output` may not resolve under `.github/`**, which holds the workflow
+  file and the CODEOWNERS entry that decide how this gate runs. Compared after
+  normalising `./` segments, doubled slashes and case to a fixed point, so
+  `./.github/x` and `.GitHub/x` are refused too. A `./` prefix is still
+  perfectly legal on any input; an earlier draft of this release refused it
+  outright and would have broken `path: ./src`.
+- **`sarif-output` may not resolve through a symlink**, at the file or at any
+  directory on the way to it, checked before the containing directories are
+  created rather than after. The head controls those, and a symlink there
+  sends the write outside the workspace.
+
 ## [0.6.0] - 2026-09-06
 
 Minor on all three packages, per the stability policy: 0.x minors may
