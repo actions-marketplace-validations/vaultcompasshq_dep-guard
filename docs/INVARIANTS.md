@@ -1371,9 +1371,12 @@ this project actually publishes.
 
 `packages/core` and `packages/cli` always move to a new version together,
 even when only one of them changed. `.github/workflows/release.yml`
-asserts this before publish (see its "Assert core and cli versions match
-each other, and the tag if there is one" step) and refuses to continue if
-they disagree.
+asserts this before publish (see its "Decide the release kind, and refuse a
+tag that is neither" step, which calls `scripts/classify-release-tag.mjs`)
+and refuses to continue if they disagree. The lockstep check is the first
+thing that script does, before it even looks at the tag, so a lockstep break
+reports as a lockstep break rather than as a tag mismatch -- and it runs on
+both kinds of release, an action-only tag included.
 
 The reason is `pnpm`'s own publish behavior, not caution for its own
 sake: `packages/cli/package.json` depends on core via `workspace:*`, and
@@ -1910,6 +1913,69 @@ one or the other, as of 0.6.1:
 - `README.md`, the prose about which scanner a tag installs (both numbers)
 - `CHANGELOG.md`, the release heading and any migration line naming a tag
 - `package.json` and each `packages/*/package.json` (the scanner version)
+
+**The release workflow now knows both shapes, and the tag has to earn the
+second one.** `.github/workflows/release.yml` used to assert that a pushed tag
+read `v` plus the package version and fail otherwise, so the v0.6.1 tag push
+went red before install, build or publish and got no Release page at all. Its
+version step now calls `scripts/classify-release-tag.mjs` instead.
+
+A tag equal to `v` plus the package version is a package release, and it
+publishes and tests exactly as it always has -- with one addition: the script
+reads `action.yml` on this path too, fails if it cannot read the `version`
+input's default, and refuses the release when that default is not the version
+being published. Publishing 0.7.0 under tag `v0.7.0` while the action that tag
+ships still installs 0.6.0 is the same split as an action-only release, in the
+one direction nobody chooses on purpose. That check is skipped when the package
+version carries a prerelease, since `action.yml` refuses a prerelease pin
+outright and no legal default could match it.
+
+Any other tag is treated as an action-only release ONLY if all five of these
+hold, and fails with a message naming the one that did not: the tag is `v` plus
+exact semver (no prerelease, no build suffix, no leading zeros, the same shape
+`action.yml` validates its `version` input against); it is strictly greater than
+the package version by numeric ordering, so `v0.9.0` against packages at 0.10.0
+is a mistake and not a forward move; `CHANGELOG.md` at the tagged commit carries
+a `## [X.Y.Z]` heading for the tag version, which is what separates a release
+somebody decided to make from a forgotten bump pushed as a tag, since every
+other condition here is satisfied by that mistake; both
+`@vaultcompass/dep-guard-core` and `@vaultcompass/dep-guard` are already on the
+npm registry at exactly the package version; and `action.yml`'s `version`
+default equals that same package version.
+
+On the action-only path the run still installs, builds, typechecks, lints and
+tests. It is tempting to skip those on the grounds that `ci.yml` already ran
+them, but this workflow never learns that: the ancestry check proves the tagged
+commit is an ANCESTOR of `main`, which every intermediate commit of a merged PR
+branch also is without ever having had a CI run of its own. And an action-only
+release's whole payload is `action.yml` plus docs, which is precisely what the
+public-hygiene lint and the action suites cover. What it skips is what exists to
+protect a publish that does not happen: the corpus walk and its checks, the
+packed-tarball install gate, the npm upgrade for OIDC trusted publishing, and
+the publish itself. It then cuts a Release whose body says nothing was
+published.
+
+The ancestry check -- the tagged commit must be on `main` -- applies to both
+kinds, because an action-only tag still moves the ref people run in `uses:`.
+Every workflow condition that reads the decision is spelled positively
+(`== 'false'` for the publish-side steps, `== 'true'` for the action-only
+Release body): an output that is empty or missing then skips publishing instead
+of running it, which `!= 'true'` would not. The registry lookup runs from a
+temp directory with an explicit `--registry`, so no `.npmrc` in THIS REPOSITORY
+can decide what "already published" means. That is the whole claim: a
+scope-specific line such as `@vaultcompass:registry=...` in a user-level or
+runner-level `.npmrc` still outranks `--registry`, and nothing here reaches
+that. The rules and the reasoning live in
+`scripts/lib/release-kind.mjs`; `scripts/tests/release-kind.test.mjs` covers
+them with the registry lookup injected, and also asserts the workflow's own
+wiring: which steps are gated, and the exact ordered list of every step from
+the decision step to the END of the release job, so a step inserted anywhere
+after the decision -- including after tag resolution, where a second publish
+would sit next to the Release that announces it -- fails the suite until
+somebody says which side of the gate it belongs on. The same file reads the
+real `action.yml` and the real `CHANGELOG.md`, so a moved default or a
+reformatted heading goes red in the pull request that does it rather than at
+tag time.
 
 They are allowed to differ, and an action-only release is the normal reason:
 nothing in the scanner changed, so publishing a new scanner purely to keep two
