@@ -1951,8 +1951,9 @@ branch also is without ever having had a CI run of its own. And an action-only
 release's whole payload is `action.yml` plus docs, which is precisely what the
 public-hygiene lint and the action suites cover. What it skips is what exists to
 protect a publish that does not happen: the corpus walk and its checks, the
-packed-tarball install gate, and the publish itself. It then cuts a Release
-whose body says nothing was published.
+packed-tarball install gate, the npm upgrade for OIDC trusted publishing, and
+the publish itself. It then cuts a Release whose body says nothing was
+published.
 
 The ancestry check -- the tagged commit must be on `main` -- applies to both
 kinds, because an action-only tag still moves the ref people run in `uses:`.
@@ -1960,12 +1961,21 @@ Every workflow condition that reads the decision is spelled positively
 (`== 'false'` for the publish-side steps, `== 'true'` for the action-only
 Release body): an output that is empty or missing then skips publishing instead
 of running it, which `!= 'true'` would not. The registry lookup runs from a
-temp directory with an explicit `--registry`, so no `.npmrc` in this tree can
-decide what "already published" means. The rules and the reasoning live in
+temp directory with an explicit `--registry`, so no `.npmrc` in THIS REPOSITORY
+can decide what "already published" means. That is the whole claim: a
+scope-specific line such as `@vaultcompass:registry=...` in a user-level or
+runner-level `.npmrc` still outranks `--registry`, and nothing here reaches
+that. The rules and the reasoning live in
 `scripts/lib/release-kind.mjs`; `scripts/tests/release-kind.test.mjs` covers
 them with the registry lookup injected, and also asserts the workflow's own
-wiring -- which steps are gated, in what order, and that the "Published ... to
-npm" claim appears only on the path that performs one.
+wiring: which steps are gated, and the exact ordered list of every step from
+the decision step to the END of the release job, so a step inserted anywhere
+after the decision -- including after tag resolution, where a second publish
+would sit next to the Release that announces it -- fails the suite until
+somebody says which side of the gate it belongs on. The same file reads the
+real `action.yml` and the real `CHANGELOG.md`, so a moved default or a
+reformatted heading goes red in the pull request that does it rather than at
+tag time.
 
 They are allowed to differ, and an action-only release is the normal reason:
 nothing in the scanner changed, so publishing a new scanner purely to keep two

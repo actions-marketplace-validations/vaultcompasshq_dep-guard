@@ -215,6 +215,26 @@ describe('readActionVersionDefault', () => {
   });
 });
 
+// The other half of that canary. The CHANGELOG condition is a pattern
+// match against a heading style nothing enforces, so the way it breaks is
+// silent: somebody reformats the headings, every test above keeps passing
+// against its own synthetic changelog, and the next action-only tag is
+// refused at tag time for a release that was perfectly fine. Reading the
+// real file here moves that discovery to the pull request that reformats
+// it.
+describe('the real CHANGELOG.md', () => {
+  it('carries a heading the action-only check can find for the current package version', () => {
+    const version = JSON.parse(
+      readFileSync(path.join(ROOT, 'packages', 'core', 'package.json'), 'utf8')
+    ).version;
+    const changelog = readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
+
+    // The same pattern classifyRelease builds, against the version the
+    // packages actually carry rather than a number written down here.
+    expect(changelog).toMatch(new RegExp(`^##\\s*\\[${version.replace(/\./g, '\\.')}\\]`, 'm'));
+  });
+});
+
 describe('classifyRelease', () => {
   it('calls a tag that equals v plus the package version a package release', () => {
     const publishedVersion = registryStub([]);
@@ -575,17 +595,27 @@ describe('.github/workflows/release.yml wiring', () => {
     'Publish to npm',
   ];
 
-  // Every step between the decision and tag resolution, gated or not, in
-  // order. The set assertion below cannot see a NEW ungated step -- that
-  // is what this list is for: inserting anything here, named or unnamed,
-  // fails until somebody states which side of the gate it belongs on.
-  const STEPS_BETWEEN_DECISION_AND_RESOLVE = [
+  // Every step from the decision to the end of the release job, gated or
+  // not, in order. The set assertion below cannot see a NEW ungated step
+  // -- that is what this list is for: inserting anything after the
+  // decision, named or unnamed, fails until somebody states which side of
+  // the gate it belongs on.
+  //
+  // It runs to the LAST step rather than stopping at tag resolution,
+  // because the steps after that point are the ones that publish a claim:
+  // a second publish step slipped in between "Resolve release tag" and
+  // "Create GitHub Release" would be past a window that ended earlier, and
+  // would run on an action-only release.
+  const STEPS_AFTER_DECISION = [
     'Install dependencies',
     'Build packages',
     'Typecheck',
     'Lint (public repository hygiene guard)',
     'Run tests',
     ...GATED_STEPS,
+    'Resolve release tag',
+    'Create GitHub Release',
+    'Create GitHub Release (action-only)',
   ];
 
   it('gates exactly the publish-side steps on the decision step output', () => {
@@ -606,13 +636,11 @@ describe('.github/workflows/release.yml wiring', () => {
     }
   });
 
-  it('accounts for every step between the decision and tag resolution, in order', () => {
+  it('accounts for every step after the decision, to the end of the job, in order', () => {
     const ids = releaseJobSteps().map((step) => step.id);
     const from = ids.indexOf('Decide the release kind, and refuse a tag that is neither');
-    const to = ids.indexOf('Resolve release tag');
     expect(from).toBeGreaterThan(-1);
-    expect(to).toBeGreaterThan(from);
-    expect(ids.slice(from + 1, to)).toEqual(STEPS_BETWEEN_DECISION_AND_RESOLVE);
+    expect(ids.slice(from + 1)).toEqual(STEPS_AFTER_DECISION);
   });
 
   it('sees a step written as bare `- uses:` with no name', () => {
