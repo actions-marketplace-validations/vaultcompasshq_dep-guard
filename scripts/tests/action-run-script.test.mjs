@@ -105,6 +105,12 @@ function makeRunner(inputs = {}) {
     `#!/bin/sh\nprintf 'cwd=%s\\n' "$(pwd -P)" >> ${JSON.stringify(npmRecord)}\n` +
       `printf 'argv=%s\\n' "$*" >> ${JSON.stringify(npmRecord)}\n` +
       `printf 'prefix=%s\\n' "\${npm_config_prefix:-unset}" >> ${JSON.stringify(npmRecord)}\n` +
+      // Also creates <prefix>/lib on an install, because a real global install
+      // does, and the step writes a manifest there and verifies from inside
+      // it. A stub that only recorded argv would abort the step on a missing
+      // directory, which is the harness failing rather than the action, and it
+      // would hide whether the verification runs at all.
+      'case "$1" in install) mkdir -p "${npm_config_prefix}/lib" ;; esac\n' +
       'exit 0\n'
   );
   chmodSync(path.join(pathDir, 'npm'), 0o755);
@@ -315,13 +321,50 @@ describe('action.yml "Install dep-guard outside the workspace"', () => {
   test('installs the pinned version globally, and nothing else', () => {
     const run = runInstall();
     expect(run.status).toBe(0);
-    expect(run.record).toContain('argv=install -g @vaultcompass/dep-guard@0.6.0');
+    expect(run.record).toContain('argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.6.0');
   });
 
   test('installs the version the input asked for, not a hardcoded one', () => {
     expect(runInstall({ version: '0.5.0' }).record).toContain(
-      'argv=install -g @vaultcompass/dep-guard@0.5.0'
+      'argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.5.0'
     );
+  });
+
+  test('never lets an installed package run its own install scripts', () => {
+    // This step runs on a runner holding the job's token, and what it installs
+    // is a CONTROL INPUT: it decides whether a pull request may merge. Without
+    // --ignore-scripts every package in the resolved tree gets arbitrary code
+    // execution here on every run.
+    const argvLine = runInstall()
+      .record.split('\n')
+      .find((l) => l.startsWith('argv=install'));
+    expect(argvLine).toBeDefined();
+    expect(argvLine).toContain('--ignore-scripts');
+  });
+
+  test('declares the scanner as a dependency, or the audit silently skips it', () => {
+    // npm audit signatures audits the tree's EDGES OUT. A global install
+    // leaves <prefix>/lib with a node_modules and no manifest, so the root
+    // declares nothing, the package just installed is on the far end of no
+    // edge, and the audit covers its dependencies while skipping the scanner
+    // itself. Measured in the sibling repositories: vault-guard 13 installed
+    // and 12 audited without this file, conductor 36 and 32. The gap is always
+    // exactly the packages the check exists for. vault-guard shipped that bug
+    // once; this repository has the manifest from the start.
+    const run = runInstall();
+    const manifestPath = path.join(run.runner.runnerTemp, 'dep-guard-action', 'lib', 'package.json');
+    expect(existsSync(manifestPath)).toBe(true);
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    // The declared version has to be the one being installed, or the audit
+    // checks a different package than the one that landed.
+    expect(manifest.dependencies['@vaultcompass/dep-guard']).toBe(run.runner.ctx.inputs.version);
+  });
+
+  test('checks the registry still serves the name and version it installed', () => {
+    // Deliberately not "verifies what it installed": the command refetches
+    // manifests from the registry and hashes nothing on disk, so a tampered
+    // install passes it. Bounded, and the action comments say so.
+    expect(runInstall().record).toContain('argv=audit signatures');
   });
 
   test('starts npm outside the checkout, so a committed .npmrc is never its cwd', () => {
