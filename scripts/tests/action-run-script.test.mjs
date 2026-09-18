@@ -355,9 +355,13 @@ describe('action.yml "Install dep-guard outside the workspace"', () => {
   });
 
   test('accepts the first npm that actually verifies, and newer', () => {
-    // The floor must not be too high either: 10.6.0 is the first version
-    // measured to pass, so refusing it would break consumers for nothing.
-    for (const ok of ['10.6.0', '10.9.2', '11.0.0']) {
+    // 10.5.2 is the FIRST version measured to pass, on a cold cache with a
+    // fresh HOME so no newer client could have primed the key set. It leads
+    // the list deliberately: v0.6.2 shipped a floor of 10.6.0, which refused
+    // Node 20.13.0 and 20.13.1 because they ship 10.5.2. A floor that is too
+    // high is a false accusation of a different kind, so both edges are
+    // pinned here and 10.5.1 sits on the refused side above.
+    for (const ok of ['10.5.2', '10.6.0', '10.9.2', '11.0.0', '12.0.0']) {
       expect([ok, runInstall({}, ok).status]).toEqual([ok, 0]);
     }
   });
