@@ -253,7 +253,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.6.1
+  - uses: vaultcompasshq/dep-guard@v0.6.2
     with:
       path: .
       online: 'true'
@@ -266,7 +266,7 @@ action tag then decides the scanner, and there is one pin to bump instead of
 two that can disagree.
 
 **The action tag and the scanner version are separate numbers, and they do not
-have to match.** `vaultcompasshq/dep-guard@v0.6.1` installs
+have to match.** `vaultcompasshq/dep-guard@v0.6.2` installs
 `@vaultcompass/dep-guard@0.6.0`, because that release changed the action and
 nothing in the scanner, so there was no new scanner to publish. Read the action
 tag as "which version of the workflow step", not as "which version of the
