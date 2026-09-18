@@ -377,6 +377,48 @@ runs:
         set -eu
         mkdir -p "${npm_config_prefix}"
 
+        # THE VERIFICATION BELOW NEEDS npm 10.6.0 OR NEWER, AND SAYS SOMETHING
+        # ALARMING AND FALSE ON AN OLDER ONE.
+        #
+        # `npm audit signatures` is not version-stable. Below 10.6.0 it fails
+        # on a CLEAN, untampered install of these very packages, because the
+        # client's bundled keys and TUF root are stale rather than because
+        # anything is wrong. On 10.5.0 it reports "Someone might have tampered
+        # with these packages since they were published on the registry!",
+        # naming ours. On 10.2.4 it is EEXPIREDSIGNATUREKEY. Bisected against a
+        # real install: 8.19.4, 9.9.4, 10.2.4 and 10.5.0 fail; 10.6.0 and every
+        # later version pass.
+        #
+        # THE SETUP-NODE STEP ABOVE IS NOT SUFFICIENT. `node-version: '22'` is
+        # a major-only spec and NODE 22.0.0 SHIPS npm 10.5.1, inside the
+        # failing band. `setup-node` satisfies a major from the runner's tool
+        # cache when it can, so a self-hosted or custom-image runner holding
+        # 22.0.0 gets a client this verification cannot use. An earlier version
+        # of this branch left the floor out on the grounds that the step above
+        # covered it; it does not, and nothing here would have caught that step
+        # being lowered or removed.
+        #
+        # Pulled out as the first version-shaped token rather than validated
+        # and then split. A shape check with `grep -Eq` matches PER LINE while
+        # the arithmetic reads the WHOLE string, so a client printing an
+        # upgrade notice above its version passed the check and then failed the
+        # comparison, leaving the floor skipped. `|| true` because grep exits 1
+        # on no match under `set -e`; output with no version in it yields the
+        # empty string and is refused.
+        NPM_VERSION="$(npm --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+        if [ -z "${NPM_VERSION}" ]; then
+          printf '::error::dep-guard: could not read an npm version to check. Refusing rather than assuming the client can verify signatures.\n'
+          exit 1
+        fi
+        NPM_MAJOR="${NPM_VERSION%%.*}"
+        NPM_REST="${NPM_VERSION#*.}"
+        NPM_MINOR="${NPM_REST%%.*}"
+        if [ "${NPM_MAJOR}" -lt 10 ] || { [ "${NPM_MAJOR}" -eq 10 ] && [ "${NPM_MINOR}" -lt 6 ]; }; then
+          printf '::error::dep-guard: npm %s cannot verify package signatures. This action needs npm 10.6.0 or newer; below that npm reports valid packages as tampered with, because its own bundled keys are stale.\n' "${NPM_VERSION}"
+          printf '::error::Pin a Node release carrying a newer npm (22.1.0 or later; 22.0.0 ships npm 10.5.1), or pin vaultcompasshq/dep-guard@v0.6.1, which does not verify.\n'
+          exit 1
+        fi
+
         # `--ignore-scripts`, because this step runs on a runner holding the
         # job's token and the thing being installed is a CONTROL INPUT: it
         # decides whether a pull request may merge. Without the flag, every
