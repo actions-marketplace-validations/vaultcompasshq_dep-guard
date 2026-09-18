@@ -10,6 +10,51 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-09-18
+
+**An action-only release. The tag moves; the npm packages do not.** Nothing in
+the scanner changed, so `@vaultcompass/dep-guard` stays at 0.6.0 on npm and the
+action's `version` default stays `0.6.0`.
+`vaultcompasshq/dep-guard@v0.6.2` installs `@vaultcompass/dep-guard@0.6.0`.
+
+### Security
+
+- **The action no longer runs install scripts, and verifies what it installed.**
+  The install step ran `npm install -g` with no `--ignore-scripts` on a runner
+  holding the job's token, so every package in the resolved tree had arbitrary
+  code execution there on every run. What it installs is a control input: it
+  decides whether a pull request may merge.
+
+  It now also runs `npm audit signatures` over the installed tree. That needs a
+  root manifest to work at all: the audit walks the tree's edges out, and a
+  global install leaves `<prefix>/lib` with no manifest, so without one the
+  audit covers the dependencies and silently skips the scanner itself.
+
+  **What the verification proves, stated narrowly:** it asks the registry for
+  each name and version in the tree, the scanner included, and checks the
+  signature served back. It does **not** read the installed files, so a tampered
+  install is invisible to it; it does **not** defeat a compromised registry,
+  which signs what it serves; and a **missing** attestation is not a failure.
+
+### Fixed
+
+- **A floor on the npm client, so the action cannot call a clean install
+  tampered with.** `npm audit signatures` is not version-stable: below npm
+  10.6.0 it fails on an untampered install of these very packages, because the
+  client's bundled keys are stale. On 10.5.0 it reports *"Someone might have
+  tampered with these packages"*, naming ours. The action now refuses up front
+  and names the npm it found.
+
+  Note `node-version: 22` is not on its own sufficient: **Node 22.0.0 ships npm
+  10.5.1**, inside the failing band. Pin 22.1.0 or later.
+
+### Changed
+
+- The README now documents both ways this step fails closed, what the
+  verification does and does not prove, and `@v0.6.1` as the pin that does not
+  verify. Previously that trade was recorded only in an internal maintainer
+  file.
+
 ## [0.6.1] - 2026-09-12
 
 **An action-only release. The tag moves; the npm packages do not.** Nothing in
