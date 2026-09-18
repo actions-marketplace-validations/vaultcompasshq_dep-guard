@@ -376,7 +376,100 @@ runs:
       run: |
         set -eu
         mkdir -p "${npm_config_prefix}"
-        npm install -g "@vaultcompass/dep-guard@${DG_VERSION}"
+
+        # THE VERIFICATION BELOW NEEDS npm 10.6.0 OR NEWER, AND SAYS SOMETHING
+        # ALARMING AND FALSE ON AN OLDER ONE.
+        #
+        # `npm audit signatures` is not version-stable. Below 10.6.0 it fails
+        # on a CLEAN, untampered install of these very packages, because the
+        # client's bundled keys and TUF root are stale rather than because
+        # anything is wrong. On 10.5.0 it reports "Someone might have tampered
+        # with these packages since they were published on the registry!",
+        # naming ours. On 10.2.4 it is EEXPIREDSIGNATUREKEY. Bisected against a
+        # real install: 8.19.4, 9.9.4, 10.2.4 and 10.5.0 fail; 10.6.0 and every
+        # later version pass.
+        #
+        # THE SETUP-NODE STEP ABOVE IS NOT SUFFICIENT. `node-version: '22'` is
+        # a major-only spec and NODE 22.0.0 SHIPS npm 10.5.1, inside the
+        # failing band. `setup-node` satisfies a major from the runner's tool
+        # cache when it can, so a self-hosted or custom-image runner holding
+        # 22.0.0 gets a client this verification cannot use. An earlier version
+        # of this branch left the floor out on the grounds that the step above
+        # covered it; it does not, and nothing here would have caught that step
+        # being lowered or removed.
+        #
+        # Pulled out as the first version-shaped token rather than validated
+        # and then split. A shape check with `grep -Eq` matches PER LINE while
+        # the arithmetic reads the WHOLE string, so a client printing an
+        # upgrade notice above its version passed the check and then failed the
+        # comparison, leaving the floor skipped. `|| true` because grep exits 1
+        # on no match under `set -e`; output with no version in it yields the
+        # empty string and is refused.
+        NPM_VERSION="$(npm --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+        if [ -z "${NPM_VERSION}" ]; then
+          printf '::error::dep-guard: could not read an npm version to check. Refusing rather than assuming the client can verify signatures.\n'
+          exit 1
+        fi
+        NPM_MAJOR="${NPM_VERSION%%.*}"
+        NPM_REST="${NPM_VERSION#*.}"
+        NPM_MINOR="${NPM_REST%%.*}"
+        if [ "${NPM_MAJOR}" -lt 10 ] || { [ "${NPM_MAJOR}" -eq 10 ] && [ "${NPM_MINOR}" -lt 6 ]; }; then
+          printf '::error::dep-guard: npm %s cannot verify package signatures. This action needs npm 10.6.0 or newer; below that npm reports valid packages as tampered with, because its own bundled keys are stale.\n' "${NPM_VERSION}"
+          printf '::error::Pin a Node release carrying a newer npm (22.1.0 or later; 22.0.0 ships npm 10.5.1), or pin vaultcompasshq/dep-guard@v0.6.1, which does not verify.\n'
+          exit 1
+        fi
+
+        # `--ignore-scripts`, because this step runs on a runner holding the
+        # job's token and the thing being installed is a CONTROL INPUT: it
+        # decides whether a pull request may merge. Without the flag, every
+        # package in the resolved tree gets arbitrary code execution here on
+        # every run, which is a strange amount of trust to extend from the tool
+        # whose job is deciding whether this repository can be trusted.
+        npm install -g --ignore-scripts "@vaultcompass/dep-guard@${DG_VERSION}"
+
+        # A ROOT MANIFEST, WITHOUT WHICH THE NEXT COMMAND SKIPS THE ONE PACKAGE
+        # IT EXISTS TO CHECK.
+        #
+        # `npm audit signatures` audits the tree's EDGES OUT: it loads the
+        # local prefix and walks what the root declares as dependencies. A
+        # global install leaves `<prefix>/lib` holding a `node_modules` and NO
+        # manifest, so the root declares nothing and the package just installed
+        # is on the far end of no edge. Its transitive dependencies are, so
+        # they get audited and the scanner itself does not.
+        #
+        # Measured in the sibling repositories, where the gap is always exactly
+        # the packages the check exists for: vault-guard 13 installed and 12
+        # audited without this file, conductor 36 and 32. vault-guard shipped
+        # that bug once and recorded the short count as evidence the check
+        # worked; this file has the manifest from the start.
+        printf '{"name":"dep-guard-action-verify","private":true,"dependencies":{"@vaultcompass/dep-guard":"%s"}}\n' \
+          "${DG_VERSION}" > "${npm_config_prefix}/lib/package.json"
+
+        # WHAT THIS COMMAND PROVES, narrowly, because the tempting summary is
+        # false. It asks the registry for each name and version in the tree and
+        # checks the registry signature served back.
+        #
+        # It does NOT read the installed files: the manifest is refetched
+        # rather than anything on disk being hashed, so a tampered install is
+        # invisible to it. It does NOT defeat a compromised registry, which
+        # signs what it serves. And a MISSING attestation is not a failure,
+        # only a missing or invalid signature is, so it does not require
+        # provenance despite this package publishing it.
+        #
+        # What remains is worth having: every name and version in the tree, the
+        # scanner included, has to be one npmjs currently serves with a valid
+        # registry signature.
+        #
+        # Fails closed under `set -eu`, deliberately. KNOWN CONSEQUENCE: a
+        # consumer whose runner points npm at a mirror or proxy that does not
+        # serve `/-/npm/v1/keys` installs fine and then fails here with
+        # EMISSINGSIGNATUREKEY, and a sigstore or TUF outage does the same to
+        # everyone at once. Documented rather than left to be discovered from a
+        # red required check.
+        #
+        # In a subshell so nothing after this line inherits the verification
+        # directory as its cwd. A failing subshell still trips `set -e`.
+        ( cd "${npm_config_prefix}/lib" && npm audit signatures )
 
     - name: Run dep-guard
       id: run

@@ -213,6 +213,34 @@ not worth a command that could delete the wrong thing.
 `action.yml` at the root of this repository is a composite action that
 runs dep-guard and uploads the result to GitHub code scanning as SARIF.
 
+The action installs the scanner with `--ignore-scripts`, so nothing in the
+resolved tree runs code on your runner at install time, and then runs
+`npm audit signatures` over what it installed.
+
+**What that verification proves, and what it does not.** It asks the registry
+for each name and version in the tree, the scanner included, and checks the
+signature served back, so an unpublished, replaced or unsigned package fails
+the step. It does **not** read the installed files, so it will not detect a
+tampered install. It does **not** defeat a compromised registry, which signs
+what it serves. And a **missing** attestation is not a failure, so it does not
+require provenance even though this package publishes it.
+
+> **Two ways this step fails closed, both on purpose.**
+>
+> It needs **npm 10.6.0 or newer**. Below that, npm reports a clean install of
+> these packages as tampered with, because its own bundled keys are stale
+> rather than because anything is wrong. The action refuses up front and names
+> the npm it found. `node-version: 22` is not on its own enough: Node
+> **22.0.0 ships npm 10.5.1**. Pin 22.1.0 or later.
+>
+> It also needs a registry that serves `/-/npm/v1/keys`. A runner pointed at a
+> mirror or proxy that does not, via `actions/setup-node`'s `registry-url:`, a
+> corporate `~/.npmrc`, or `npm_config_registry`, installs fine and then fails
+> with `EMISSINGSIGNATUREKEY`. A sigstore outage has the same effect.
+>
+> If either blocks you, pin `vaultcompasshq/dep-guard@v0.6.1`, which does not
+> verify.
+
 ```yaml
 permissions:
   contents: read

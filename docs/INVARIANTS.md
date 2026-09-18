@@ -1885,6 +1885,44 @@ is documented not to read project config, which is a property of a version
 of npm rather than of this repository, and is not what the boundary should
 rest on.
 
+**The install also refuses to run the tree's scripts, and verifies what
+arrived.** Two more properties of the same step, both following from the
+scanner being a control input rather than an ordinary dependency.
+
+`--ignore-scripts`, because the step runs on a runner holding the job's token.
+Without it every package in the resolved tree gets arbitrary code execution
+there on every run.
+
+A ROOT MANIFEST under `<prefix>/lib`, and it is load-bearing. `npm audit
+signatures` audits the tree's EDGES OUT, and a global install leaves that
+directory with a `node_modules` and no manifest, so the root declares nothing
+and the package just installed is on the far end of no edge. Without it the
+audit covers the dependencies and SKIPS THE SCANNER, the one package it exists
+for. Measured in the sibling repositories, where the gap is always exactly the
+packages under check: vault-guard 13 installed and 12 audited without the file,
+conductor 36 and 32. vault-guard shipped that bug once and recorded the short
+count as evidence the check worked; this repository has the manifest from the
+start.
+
+WHAT THE VERIFICATION PROVES, narrowly, because the obvious summary is wrong.
+It asks the registry for each name and version in the tree and checks the
+signature served back. It does NOT read the installed files, so a tampered
+install is invisible to it. It does NOT defeat a compromised registry, which
+signs what it serves. And a MISSING attestation is not a failure, only a
+missing or invalid signature is, so it does not require provenance despite this
+package publishing it. What remains is that every name and version in the tree,
+the scanner included, has to be one npmjs currently serves with a valid
+signature.
+
+KNOWN CONSEQUENCE OF FAILING CLOSED: a runner pointed at a mirror or proxy that
+does not serve `/-/npm/v1/keys`, or a sigstore outage, installs fine and then
+fails this step with `EMISSINGSIGNATUREKEY`.
+
+**Enforced by:** the install cases in `scripts/tests/action-run-script.test.mjs`
+(the argv carries the flag, the manifest names the version being installed, and
+the audit is recorded). The stub is npm, so those prove the action ASKS; the
+counts above are what a real npm does.
+
 The install step's own `working-directory` line is DEFENCE IN DEPTH that
 `bench/action-install.mjs` cannot observe directly, and that is worth stating
 plainly rather than leaving a gap the harness's own coverage would seem to

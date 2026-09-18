@@ -67,7 +67,7 @@ const DEFAULT_INPUTS = {
 // workflow with an earlier install step actually produces. Without that
 // ordering, "the planted copy never ran" would hold for the uninteresting
 // reason that nothing could have reached it.
-function makeRunner(inputs = {}) {
+function makeRunner(inputs = {}, npmVersion = '10.9.2') {
   const dir = mkdtempSync(path.join(tmpdir(), 'depguard-action-'));
   const workspace = path.join(dir, 'workspace');
   const runnerTemp = path.join(dir, 'runner-temp');
@@ -105,6 +105,18 @@ function makeRunner(inputs = {}) {
     `#!/bin/sh\nprintf 'cwd=%s\\n' "$(pwd -P)" >> ${JSON.stringify(npmRecord)}\n` +
       `printf 'argv=%s\\n' "$*" >> ${JSON.stringify(npmRecord)}\n` +
       `printf 'prefix=%s\\n' "\${npm_config_prefix:-unset}" >> ${JSON.stringify(npmRecord)}\n` +
+      // Also creates <prefix>/lib on an install, because a real global install
+      // does, and the step writes a manifest there and verifies from inside
+      // it. A stub that only recorded argv would abort the step on a missing
+      // directory, which is the harness failing rather than the action, and it
+      // would hide whether the verification runs at all.
+      // A real npm answers `--version`, and the step now reads it: below
+      // 10.6.0 the verification calls a clean install tampered with. Written
+      // with `%b` so a test can hand it MULTIPLE lines and reproduce a client
+      // printing an upgrade notice above its version, the shape that defeated
+      // two earlier versions of the floor in a sibling repository.
+      `case "$1" in --version) printf '%b\\n' "${npmVersion}" ;; ` +
+      'install) mkdir -p "${npm_config_prefix}/lib" ;; esac\n' +
       'exit 0\n'
   );
   chmodSync(path.join(pathDir, 'npm'), 0o755);
@@ -289,8 +301,8 @@ describe('action.yml "Run dep-guard", under GitHub bash flags', () => {
 // started, and with what prefix, is the half that keeps the head's .npmrc out
 // of the decision, and nothing was checking it.
 describe('action.yml "Install dep-guard outside the workspace"', () => {
-  function runInstall(inputs = {}) {
-    const runner = makeRunner(inputs);
+  function runInstall(inputs = {}, npmVersion = '10.9.2') {
+    const runner = makeRunner(inputs, npmVersion);
     const scriptFile = path.join(runner.dir, 'install.sh');
     writeFileSync(scriptFile, extractRunScript('Install dep-guard outside the workspace'));
     let status = 0;
@@ -315,13 +327,98 @@ describe('action.yml "Install dep-guard outside the workspace"', () => {
   test('installs the pinned version globally, and nothing else', () => {
     const run = runInstall();
     expect(run.status).toBe(0);
-    expect(run.record).toContain('argv=install -g @vaultcompass/dep-guard@0.6.0');
+    expect(run.record).toContain('argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.6.0');
   });
 
   test('installs the version the input asked for, not a hardcoded one', () => {
     expect(runInstall({ version: '0.5.0' }).record).toContain(
-      'argv=install -g @vaultcompass/dep-guard@0.5.0'
+      'argv=install -g --ignore-scripts @vaultcompass/dep-guard@0.5.0'
     );
+  });
+
+  test('refuses an npm too old to verify, rather than calling a clean install tampered with', () => {
+    // `npm audit signatures` is not version-stable. Below 10.6.0 it fails on a
+    // CLEAN install of these very packages: on 10.5.0 it says "Someone might
+    // have tampered with these packages", naming ours; on 10.2.4 it is
+    // EEXPIREDSIGNATUREKEY. Both false and both alarming.
+    //
+    // THE SETUP-NODE STEP DOES NOT COVER THIS, which is why the check exists.
+    // `node-version: '22'` is a major-only spec and Node 22.0.0 ships npm
+    // 10.5.1, inside the failing band; setup-node satisfies a major from the
+    // runner's tool cache when it can.
+    for (const old of ['8.19.4', '9.9.4', '10.2.4', '10.5.0', '10.5.1']) {
+      const run = runInstall({}, old);
+      expect([old, run.status]).not.toEqual([old, 0]);
+      // It must not have installed anything with a client it cannot use.
+      expect([old, run.record.includes('argv=install')]).toEqual([old, false]);
+    }
+  });
+
+  test('accepts the first npm that actually verifies, and newer', () => {
+    // The floor must not be too high either: 10.6.0 is the first version
+    // measured to pass, so refusing it would break consumers for nothing.
+    for (const ok of ['10.6.0', '10.9.2', '11.0.0']) {
+      expect([ok, runInstall({}, ok).status]).toEqual([ok, 0]);
+    }
+  });
+
+  test('still reads the version when npm prints a notice above it', () => {
+    // The shape that defeated two earlier versions of this floor in a sibling
+    // repository: a per-line shape check passed, the arithmetic then read the
+    // WHOLE string, errored, the `if` read false, and the floor was skipped on
+    // a client it exists to refuse.
+    const old = runInstall({}, 'npm notice a new version is available\\n10.5.0');
+    expect(old.status).not.toBe(0);
+    expect(old.record.includes('argv=install')).toBe(false);
+
+    // And the same shape must not refuse a client that is fine.
+    expect(runInstall({}, 'npm notice a new version is available\\n10.9.2').status).toBe(0);
+  });
+
+  test('refuses rather than assumes when it cannot read a version at all', () => {
+    // A guard that fails open when it cannot see is not a guard.
+    for (const unreadable of ['', 'not a version']) {
+      const run = runInstall({}, unreadable);
+      expect([unreadable, run.status]).not.toEqual([unreadable, 0]);
+      expect([unreadable, run.record.includes('argv=install')]).toEqual([unreadable, false]);
+    }
+  });
+
+  test('never lets an installed package run its own install scripts', () => {
+    // This step runs on a runner holding the job's token, and what it installs
+    // is a CONTROL INPUT: it decides whether a pull request may merge. Without
+    // --ignore-scripts every package in the resolved tree gets arbitrary code
+    // execution here on every run.
+    const argvLine = runInstall()
+      .record.split('\n')
+      .find((l) => l.startsWith('argv=install'));
+    expect(argvLine).toBeDefined();
+    expect(argvLine).toContain('--ignore-scripts');
+  });
+
+  test('declares the scanner as a dependency, or the audit silently skips it', () => {
+    // npm audit signatures audits the tree's EDGES OUT. A global install
+    // leaves <prefix>/lib with a node_modules and no manifest, so the root
+    // declares nothing, the package just installed is on the far end of no
+    // edge, and the audit covers its dependencies while skipping the scanner
+    // itself. Measured in the sibling repositories: vault-guard 13 installed
+    // and 12 audited without this file, conductor 36 and 32. The gap is always
+    // exactly the packages the check exists for. vault-guard shipped that bug
+    // once; this repository has the manifest from the start.
+    const run = runInstall();
+    const manifestPath = path.join(run.runner.runnerTemp, 'dep-guard-action', 'lib', 'package.json');
+    expect(existsSync(manifestPath)).toBe(true);
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    // The declared version has to be the one being installed, or the audit
+    // checks a different package than the one that landed.
+    expect(manifest.dependencies['@vaultcompass/dep-guard']).toBe(run.runner.ctx.inputs.version);
+  });
+
+  test('checks the registry still serves the name and version it installed', () => {
+    // Deliberately not "verifies what it installed": the command refetches
+    // manifests from the registry and hashes nothing on disk, so a tampered
+    // install passes it. Bounded, and the action comments say so.
+    expect(runInstall().record).toContain('argv=audit signatures');
   });
 
   test('starts npm outside the checkout, so a committed .npmrc is never its cwd', () => {
