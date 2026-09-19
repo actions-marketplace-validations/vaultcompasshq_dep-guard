@@ -227,11 +227,16 @@ require provenance even though this package publishes it.
 
 > **Two ways this step fails closed, both on purpose.**
 >
-> It needs **npm 10.6.0 or newer**. Below that, npm reports a clean install of
+> It needs **npm 10.5.2 or newer**. Below that, npm reports a clean install of
 > these packages as tampered with, because its own bundled keys are stale
 > rather than because anything is wrong. The action refuses up front and names
 > the npm it found. `node-version: 22` is not on its own enough: Node
-> **22.0.0 ships npm 10.5.1**. Pin 22.1.0 or later.
+> **22.0.0 ships npm 10.5.1**, one patch below the floor. Node 20.13.0 and
+> later, and 22.1.0 and later, carry a usable npm.
+>
+> **If you are on `@v0.6.2`, upgrade.** That release shipped this floor as
+> 10.6.0, which was wrong by two patch versions and refuses Node 20.13.x with
+> a message saying the client cannot verify signatures when it can.
 >
 > It also needs a registry that serves `/-/npm/v1/keys`. A runner pointed at a
 > mirror or proxy that does not, via `actions/setup-node`'s `registry-url:`, a
@@ -253,7 +258,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.6.2
+  - uses: vaultcompasshq/dep-guard@v0.6.3
     with:
       path: .
       online: 'true'
@@ -266,7 +271,7 @@ action tag then decides the scanner, and there is one pin to bump instead of
 two that can disagree.
 
 **The action tag and the scanner version are separate numbers, and they do not
-have to match.** `vaultcompasshq/dep-guard@v0.6.2` installs
+have to match.** `vaultcompasshq/dep-guard@v0.6.3` installs
 `@vaultcompass/dep-guard@0.6.0`, because that release changed the action and
 nothing in the scanner, so there was no new scanner to publish. Read the action
 tag as "which version of the workflow step", not as "which version of the

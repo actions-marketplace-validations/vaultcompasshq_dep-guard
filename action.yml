@@ -377,17 +377,27 @@ runs:
         set -eu
         mkdir -p "${npm_config_prefix}"
 
-        # THE VERIFICATION BELOW NEEDS npm 10.6.0 OR NEWER, AND SAYS SOMETHING
+        # THE VERIFICATION BELOW NEEDS npm 10.5.2 OR NEWER, AND SAYS SOMETHING
         # ALARMING AND FALSE ON AN OLDER ONE.
         #
-        # `npm audit signatures` is not version-stable. Below 10.6.0 it fails
+        # `npm audit signatures` is not version-stable. Below 10.5.2 it fails
         # on a CLEAN, untampered install of these very packages, because the
         # client's bundled keys and TUF root are stale rather than because
         # anything is wrong. On 10.5.0 it reports "Someone might have tampered
         # with these packages since they were published on the registry!",
-        # naming ours. On 10.2.4 it is EEXPIREDSIGNATUREKEY. Bisected against a
-        # real install: 8.19.4, 9.9.4, 10.2.4 and 10.5.0 fail; 10.6.0 and every
-        # later version pass.
+        # naming ours. On 10.2.4 it is EEXPIREDSIGNATUREKEY.
+        #
+        # Bisected against a real install with a COLD CACHE AND A FRESH HOME,
+        # so no newer client could have primed the TUF root or the key set:
+        # 8.19.4, 9.9.4, 10.2.4, 10.5.0 and 10.5.1 fail; 10.5.2 and every later
+        # version pass, with 10.5.2 verifying the same package and attestation
+        # counts as current npm rather than a reduced set.
+        #
+        # THE FLOOR SHIPPED AS 10.6.0 IN v0.6.2 AND WAS WRONG. That number came
+        # from a bisection that tested 10.5.0 and then 10.6.0 and never tested
+        # what lay between them. NODE 20.13.0 AND 20.13.1 SHIP npm 10.5.2, so
+        # v0.6.2 hard-refuses those consumers with a message telling them their
+        # client cannot do something it demonstrably can.
         #
         # THE SETUP-NODE STEP ABOVE IS NOT SUFFICIENT. `node-version: '22'` is
         # a major-only spec and NODE 22.0.0 SHIPS npm 10.5.1, inside the
@@ -413,9 +423,30 @@ runs:
         NPM_MAJOR="${NPM_VERSION%%.*}"
         NPM_REST="${NPM_VERSION#*.}"
         NPM_MINOR="${NPM_REST%%.*}"
-        if [ "${NPM_MAJOR}" -lt 10 ] || { [ "${NPM_MAJOR}" -eq 10 ] && [ "${NPM_MINOR}" -lt 6 ]; }; then
-          printf '::error::dep-guard: npm %s cannot verify package signatures. This action needs npm 10.6.0 or newer; below that npm reports valid packages as tampered with, because its own bundled keys are stale.\n' "${NPM_VERSION}"
-          printf '::error::Pin a Node release carrying a newer npm (22.1.0 or later; 22.0.0 ships npm 10.5.1), or pin vaultcompasshq/dep-guard@v0.6.1, which does not verify.\n'
+        NPM_PATCH="${NPM_REST#*.}"
+
+        # WRITTEN AS "ACCEPT ONLY IF PROVABLY OK", NOT "REFUSE IF BAD".
+        #
+        # `[` returns 2 on a malformed comparison, and an `if` reads 2 as
+        # false. A refuse-if-bad shape therefore turns any arithmetic error
+        # into permission to proceed, which is precisely how the first two
+        # versions of this guard failed open. Here an error leaves NPM_OK at 0
+        # and the step refuses, so the direction of failure is closed by
+        # construction rather than by getting an expression right.
+        NPM_OK=0
+        if [ "${NPM_MAJOR}" -gt 10 ] 2>/dev/null; then
+          NPM_OK=1
+        elif [ "${NPM_MAJOR}" -eq 10 ] 2>/dev/null; then
+          if [ "${NPM_MINOR}" -gt 5 ] 2>/dev/null; then
+            NPM_OK=1
+          elif [ "${NPM_MINOR}" -eq 5 ] 2>/dev/null && [ "${NPM_PATCH}" -ge 2 ] 2>/dev/null; then
+            NPM_OK=1
+          fi
+        fi
+
+        if [ "${NPM_OK}" -ne 1 ]; then
+          printf '::error::dep-guard: npm %s cannot verify package signatures. This action needs npm 10.5.2 or newer; below that npm reports valid packages as tampered with, because its own bundled keys are stale.\n' "${NPM_VERSION}"
+          printf '::error::Pin a Node release carrying a newer npm. Node 20.13.0 and later, and 22.1.0 and later, are fine; 22.0.0 ships npm 10.5.1 and is not. Or pin vaultcompasshq/dep-guard@v0.6.1, which does not verify.\n'
           exit 1
         fi
 

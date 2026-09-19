@@ -10,6 +10,42 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-09-18
+
+**An action-only release, and a correction to v0.6.2.** The npm packages stay
+at 0.6.0. `vaultcompasshq/dep-guard@v0.6.3` installs
+`@vaultcompass/dep-guard@0.6.0`.
+
+**Upgrade from `@v0.6.2` if you pin it.** That release refuses working npm
+clients.
+
+### Fixed
+
+- **The npm floor was wrong by two patch versions, and refused clients that
+  work.** v0.6.2 required npm 10.6.0. The real boundary is **10.5.2**: it
+  verifies signatures correctly, with the same package and attestation counts
+  as current npm rather than a reduced set. Re-bisected with a cold cache and
+  a fresh `HOME`, so no newer client could have primed the TUF root or the key
+  set: 8.19.4, 9.9.4, 10.2.4, 10.5.0 and 10.5.1 fail; **10.5.2** and every
+  later version pass.
+
+  This reached real consumers rather than being a rounding error. **Node
+  20.13.0 and 20.13.1 ship npm 10.5.2**, so anyone pinning those got a hard
+  refusal from v0.6.2 whose message told them their client could not do
+  something it demonstrably can.
+
+  The wrong number came from a bisection that tested 10.5.0 and then 10.6.0
+  and never tested what lay between them, and it was then written into the
+  action, this changelog, the README and the test fixtures as a measured fact.
+
+- **The comparison is restructured so an arithmetic error cannot read as
+  permission.** It now accepts only if the client is provably at or above the
+  floor, rather than refusing if it is below. `[` returns 2 on a malformed
+  comparison and an `if` reads 2 as false, so the previous shape turned any
+  such error into a pass. That is how the first two versions of this guard
+  failed open, and the third had the same latent shape even though no real npm
+  output could reach it.
+
 ## [0.6.2] - 2026-09-18
 
 **An action-only release. The tag moves; the npm packages do not.** Nothing in
