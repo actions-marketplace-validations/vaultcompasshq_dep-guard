@@ -10,6 +10,31 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+### Security
+
+- **A scan that resolves zero manifests while a manifest sits on disk now
+  fails closed (could-not-run) instead of reporting a clean pass.** Ported
+  from a whole-tree-scan invariant in a sibling scanner, adapted to
+  dep-guard's own unit of work: a manifest, not a file. `scan()` resolves
+  package.json (root and every discovered workspace member) plus a
+  recognized lockfile into the state it judges; when that resolution comes
+  back empty, a cheap, resolver-independent filesystem probe now checks
+  whether a manifest-shaped file (package.json, package-lock.json,
+  pnpm-lock.yaml, yarn.lock, bun.lock, or bun.lockb) exists anywhere under
+  the scan root at all. If one does, the run refuses with a
+  `manifests-unresolved` error (exit 2) rather than reporting "no risky
+  dependencies found" over a tree it never actually looked at. A genuinely
+  dependency-free repository, where the probe agrees with the resolver that
+  nothing is there, is unaffected and stays a clean exit 0, same as before:
+  a repo with no dependencies legitimately has nothing to check.
+
+  This scopes honestly to the case it actually catches: a manifest present
+  on disk that the resolver's own rules (an undeclared workspace, a
+  --staged run whose index does not yet hold a newly created package.json,
+  a symlink that resolves outside the scan root) never reached. A wrong
+  scan root that still resolves at least one real manifest is not caught
+  here -- running at the repository root remains the primary protection.
+
 ## [0.6.4] - 2026-09-18
 
 **An action-only release.** The npm packages stay at 0.6.0.

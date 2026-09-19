@@ -736,6 +736,14 @@ const LOCKFILE_CANDIDATES: Array<[string, LockfileLoader]> = [
   ['bun.lockb', (lockfilePath) => binaryLockfile(lockfilePath)],
 ];
 
+// The lockfile names this module recognizes, exported so a caller that
+// needs to recognize the same variety of file without duplicating this
+// list -- scan.ts's empty-scan-fail-closed existence probe -- stays in
+// sync with whatever loadLockfile actually looks for. Unlike
+// LOCKFILE_CANDIDATES, order carries no meaning here: every consumer of
+// this array only ever asks "is this name one of them".
+export const LOCKFILE_FILE_NAMES: readonly string[] = LOCKFILE_CANDIDATES.map(([name]) => name);
+
 // A parse failure propagates. A null return means the file is genuinely
 // absent and nothing else: swallowing a malformed before-side lockfile
 // into a null would turn a one-line change into a whole-repository delta,
@@ -883,6 +891,90 @@ export async function assertScannablePath(repoRoot: string): Promise<void> {
   if (!stats.isDirectory()) {
     throw new DepGuardError(`${repoRoot}: is not a directory`, 'path-missing');
   }
+}
+
+// Names probeManifestOnDisk treats as "this is a manifest", the union of
+// the root manifest name and every lockfile format loadLockfile
+// recognizes -- the exact set loadState can turn into a resolved
+// RepoState, so a hit here can never be a file the resolver would not
+// also have recognized by name.
+const MANIFEST_PROBE_NAMES = new Set<string>([ROOT_MANIFEST, ...LOCKFILE_FILE_NAMES]);
+
+// Directories a manifest search skips outright. node_modules holds
+// thousands of installed packages' own package.json files in a populated
+// repository -- every one of them a real file on disk that has nothing to
+// do with whether THIS repository's own dependencies were resolved -- and
+// .git is version-control bookkeeping, never project content.
+const PROBE_SKIP_DIRS = new Set<string>(['node_modules', '.git']);
+
+// How many directory levels probeManifestOnDisk descends below the scan
+// root. Deep enough to reach an ordinary workspace layout
+// (packages/<name>/package.json is two levels down) with room to spare,
+// shallow enough that an unrelated tree under the wrong root cannot make
+// this cheap probe expensive. A search that stopped short would only ever
+// make the probe MISS a real manifest, which only means the existing,
+// softer behaviour (a clean pass) is kept -- never a wrongful could-not-run
+// -- so erring toward "shallow enough to stay cheap" is the safe direction
+// here, unlike almost everywhere else in this module.
+const MANIFEST_PROBE_MAX_DEPTH = 4;
+
+/**
+ * A cheap, resolver-INDEPENDENT answer to "does anything that looks like a
+ * dependency manifest exist anywhere under this root". Used by scan.ts to
+ * tell apart the two reasons a scan can resolve zero manifests: a
+ * repository that genuinely has none (a real, legitimate state -- stays a
+ * clean pass) from one where a manifest sits on disk but the resolver's own
+ * rules (workspace globs, the git index for --staged, symlink containment)
+ * never reached it (could-not-run instead).
+ *
+ * Deliberately not a second implementation of the resolver: it does not
+ * read a workspaces field or pnpm-workspace.yaml, so it does not know which
+ * subdirectories the resolver considers packages, and it does not follow
+ * symlinks, so a manifest reachable only through one is invisible here
+ * exactly as it is to a plain recursive listing. Both are asymmetric in the
+ * safe direction -- a manifest this probe cannot see only ever costs the
+ * existing (softer) behaviour, never a wrongful could-not-run, because this
+ * function is only ever consulted when the real resolver already found
+ * zero.
+ *
+ * Reads the real filesystem, not whichever git snapshot the scan mode is
+ * judging (the index for --staged, a ref for --base). A repository that has
+ * a real, on-disk package.json the developer has not yet run `git add` on
+ * is exactly the situation this probe is meant to flag as suspicious -- see
+ * scan.ts's empty-scan-fail-closed note for the tradeoff this accepts.
+ */
+export async function probeManifestOnDisk(
+  root: string,
+  depth: number = MANIFEST_PROBE_MAX_DEPTH
+): Promise<boolean> {
+  let entries;
+  try {
+    entries = await readdir(root, { withFileTypes: true });
+  } catch {
+    // An unreadable or vanished directory is not a manifest; scan.ts's own
+    // assertScannablePath already ran before this is ever reached, so a
+    // failure here is some other directory further down the walk, not the
+    // scan root itself.
+    return false;
+  }
+  const subdirs: string[] = [];
+  for (const entry of entries) {
+    if (entry.isFile() && MANIFEST_PROBE_NAMES.has(entry.name)) {
+      return true;
+    }
+    if (entry.isDirectory() && !PROBE_SKIP_DIRS.has(entry.name)) {
+      subdirs.push(entry.name);
+    }
+  }
+  if (depth <= 0) {
+    return false;
+  }
+  for (const dir of subdirs) {
+    if (await probeManifestOnDisk(path.join(root, dir), depth - 1)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // git resolves "REF:path" against the top of the working tree, so the
