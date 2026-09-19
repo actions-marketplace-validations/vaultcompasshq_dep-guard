@@ -10,6 +10,74 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-18
+
+**An action-only release.** The npm packages stay at 0.6.0.
+`vaultcompasshq/dep-guard@v0.6.4` installs `@vaultcompass/dep-guard@0.6.0`.
+
+### Security
+
+- **On a pull request, the `version` input may no longer ask for a scanner
+  older than the one this action tag ships.** On a same-repo `pull_request`
+  event GitHub runs the workflow file from the pull request HEAD, so the
+  `version:` input is written by the pull request being judged. The only check
+  on it was a SHAPE check: it proves the value names a version and says nothing
+  about which one, so every published version cleared it.
+
+  Nine scanners are published, 0.1.0 through 0.6.0. What stops a backward pin
+  today is not that check but a FLAG: `--trust-base` arrived in the 0.6.0
+  scanner, the Action's run step appends it on every pull-request run with no
+  opt-out, and a scanner at or below 0.5.0 answers `error: unknown option
+  '--trust-base'`. A backward pin therefore already fails the job, at the scan,
+  with a message about an unknown option rather than about what the pin was
+  doing. This rule moves that failure up to the validate step and names the
+  cause. The day a 0.7.0 scanner ships with new rules, a pull request pins
+  `version: 0.6.0`, which knows `--trust-base` and runs cleanly, and is judged
+  by the older rule set it chose for itself. It is the same class of hole as
+  `trust-base: off`, which this action already refuses by name. The difference
+  is what a reviewer sees: deleting a security step reads as deleting a
+  security step, while `version: 0.6.0` reads as ordinary version management.
+
+  On pull-request events the validate step now refuses a `version` below the
+  scanner this Action tag ships, naming both numbers and pointing at the fix,
+  which is to remove the input. Pinning **forward** is still accepted there, on
+  an assumption the rule does not enforce: that a newer scanner is at least as
+  strict. Forward pins are not bounded.
+
+  **Where it fires** is exactly where `GITHUB_BASE_REF` is set, which is
+  `pull_request` and `pull_request_target`. Push runs are out of scope. That is
+  a scope statement, not a safety argument: a push run on an unprotected
+  feature branch runs that branch's own workflow file, written by the same
+  author, and is as author-controlled as a pull request. It is not covered.
+
+  **What this costs, and the migration.** Nine scanners are published, so a
+  workflow pinning any of `0.1.0` through `0.5.0` passes the shape check on a
+  pull request today and is refused by v0.6.4 at the validate step. Such a pin
+  is already broken on that event, because those scanners do not know
+  `--trust-base` and the run step always passes it; what changes is that the
+  job now fails earlier with a message saying why. **If you pin `version` below
+  `0.6.0`: remove the `version` input, which is the pin you want because the
+  default is the scanner this Action tag ships, or raise it to `0.6.0` or
+  newer.** A pin at or above `0.6.0` is unaffected, and so is every push run.
+
+  **The comparison is against a constant of its own,** `DG_TAG_SCANNER` in
+  `action.yml`, not against anything derived from an input: `inputs.version`
+  looks identical whether the consumer pinned it or the default supplied it, so
+  the step cannot tell a pin from a default. It is not the npm floor in the
+  install step either, which is a property of the npm CLIENT and has nothing to
+  say about the scanner. A test ties `DG_TAG_SCANNER`, the `version` input's
+  default and both published package versions to one number, because a constant
+  left BEHIND a published scanner would go on admitting the pin it exists to
+  refuse, and would do it quietly.
+
+  **What this does not cover:** forks, where the base repository's workflow
+  file runs, so a fork author never writes the `version:` that judges them (the
+  rule still fires on a fork pull request and judges the base workflow's own
+  pin, so a deliberate backward pin there refuses every fork run); and a pull
+  request that deletes the step or moves the `uses:` pin, for which branch
+  protection with required review on `.github/workflows/**` remains the
+  control.
+
 ## [0.6.3] - 2026-09-18
 
 **An action-only release, and a correction to v0.6.2.** The npm packages stay

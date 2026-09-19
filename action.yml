@@ -185,6 +185,125 @@ runs:
           exit 1
         fi
 
+        # A FLOOR ON ONE EVENT ONLY: on a pull request, `version` may not name
+        # a scanner OLDER than the one this action tag ships with.
+        #
+        # THE HOLE. On a same-repo `pull_request` event GitHub runs the workflow
+        # file from the HEAD, so the `version:` input is written by the pull
+        # request being judged. The shape check above proves the input names a
+        # version and says nothing about WHICH one: every published version
+        # clears it, and nine are published, 0.1.0 through 0.6.0.
+        #
+        # WHAT ALREADY STOPS A BACKWARD PIN TODAY is not the shape check but a
+        # FLAG. `--trust-base` arrived in the 0.6.0 scanner, the run step
+        # appends it on every pull-request run and offers no opt-out, and a
+        # scanner at or below 0.5.0 answers `error: unknown option
+        # '--trust-base'`. So a pull request pinning 0.5.0 today already fails
+        # the job -- at the scan, several steps later, with a message about an
+        # unknown option rather than about what the pin was doing. This rule
+        # moves that failure up to the validate step and names the cause. It is
+        # a de facto flag-compatibility floor at 0.6.0, and the rule makes it
+        # explicit instead of leaving it to be discovered.
+        #
+        # The day a 0.7.0 scanner ships with new rules, a pull request pins
+        # 0.6.0, which knows `--trust-base` and runs cleanly, and is judged by
+        # the older rule set it chose for itself.
+        #
+        # This is the same class of hole as `trust-base: off`, refused by name a
+        # few checks below for exactly this reason. The difference is what a
+        # reviewer sees: deleting a security step reads as deleting a security
+        # step, while `version: 0.6.0` reads as ordinary version management.
+        #
+        # FORWARD STAYS ALLOWED, ON AN ASSUMPTION THIS RULE DOES NOT ENFORCE.
+        # The rule assumes a newer scanner is at least as strict as the one this
+        # tag ships. Nothing here checks that, and forward pins are not bounded:
+        # any higher version is accepted, including one that does not exist yet
+        # and one whose rules turn out to be weaker. The `version` input exists
+        # so a consumer can pin one. Only the backward direction, on the one
+        # event where the workflow file is written by the side under judgment,
+        # is refused.
+        #
+        # A CONSTANT OF ITS OWN, not the npm floor in the install step and not
+        # anything derived from an input. The npm floor is a property of the
+        # npm CLIENT and has nothing to say about the scanner.
+        # DG_TAG_SCANNER is THE TESTED SCANNER THIS TAG SHIPS, which moves with
+        # the published packages, and it is the `version` input's default. It is
+        # compared against as a hardcoded constant because `inputs.version` looks
+        # identical whether the consumer wrote 0.6.0 or the default supplied it,
+        # so the step cannot tell a pin from a default and the constant is the
+        # only source of truth. It is safe to trust because action.yml comes
+        # from the ref the consumer's workflow names, not from the pull
+        # request's tree.
+        #
+        # THAT HOLDS WHEN THE CONSUMER NAMES THIS ACTION BY OWNER AND REF, as
+        # `vaultcompasshq/dep-guard@TAG`. A LOCAL-PATH reference instead, the
+        # `./some/dir` form, reads action.yml out of the pull request's OWN
+        # tree, so the constant below is author-controlled and this rule
+        # protects nothing there. Self-testing workflows inside this repository
+        # are the usual reason to reference it that way.
+        #
+        # (Spelled without the `uses` KEY on purpose: a text guard in
+        # scripts/tests/action-path-validation.test.mjs requires every one of
+        # those in this file to end in a 40-character sha, and it cannot tell
+        # prose from a step.)
+        DG_TAG_SCANNER_MAJOR=0
+        DG_TAG_SCANNER_MINOR=6
+        DG_TAG_SCANNER_PATCH=0
+        DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
+
+        # GITHUB_BASE_REF being non-empty IS the pull-request test, and it is the
+        # same one the run step uses to decide whether to pass `--trust-base`
+        # under `auto`. A second detector for the same event is a second thing to
+        # keep in step.
+        if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+          # Matched again rather than read out of `BASH_REMATCH` from the shape
+          # check above. That array does survive the `!` there, but a reader
+          # repairing the shape check has no way to know this block is
+          # downstream of it, and a silently emptied capture would compare
+          # against zeroes and let everything through. The pattern is the same
+          # one deliberately, so the two cannot drift into disagreeing about
+          # what a version is.
+          if [[ ! "${DG_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf '::error::dep-guard: internal: %q passed the version shape check and then did not parse. Refusing rather than guessing.\n' "${DG_VERSION}"
+            exit 1
+          fi
+          DG_MAJOR="${BASH_REMATCH[1]}"
+          DG_MINOR="${BASH_REMATCH[2]}"
+          DG_PATCH="${BASH_REMATCH[3]}"
+
+          # WRITTEN AS "ACCEPT ONLY IF PROVABLY NEW ENOUGH", NOT "REFUSE IF OLD".
+          #
+          # `[` returns 2 on a malformed comparison, and an `if` reads 2 as
+          # false, so a refuse-if shape turns an arithmetic error into
+          # permission -- on the one check whose whole job is to refuse. Here an
+          # error leaves the flag at 0 and the step refuses, so the failure
+          # direction is closed by construction rather than by getting every
+          # expression right. It is the same shape the npm floor in the install
+          # step uses, and for the same reason: the first two versions of that
+          # guard failed open by being written the other way round.
+          #
+          # Component by component, never as text: `0.10.0` sorts BELOW `0.7.0`
+          # as a string and above it as a version, and a lexicographic check
+          # would refuse the forward pin this rule deliberately leaves open.
+          DG_PR_SCANNER_OK=0
+          if [ "${DG_MAJOR}" -gt "${DG_TAG_SCANNER_MAJOR}" ] 2>/dev/null; then
+            DG_PR_SCANNER_OK=1
+          elif [ "${DG_MAJOR}" -eq "${DG_TAG_SCANNER_MAJOR}" ] 2>/dev/null; then
+            if [ "${DG_MINOR}" -gt "${DG_TAG_SCANNER_MINOR}" ] 2>/dev/null; then
+              DG_PR_SCANNER_OK=1
+            elif [ "${DG_MINOR}" -eq "${DG_TAG_SCANNER_MINOR}" ] 2>/dev/null && [ "${DG_PATCH}" -ge "${DG_TAG_SCANNER_PATCH}" ] 2>/dev/null; then
+              DG_PR_SCANNER_OK=1
+            fi
+          fi
+
+          if [ "${DG_PR_SCANNER_OK}" -ne 1 ]; then
+            printf '::error::dep-guard: on a pull request the `version` input may not ask for a scanner older than the one this action tag ships. It asks for %s, and this tag ships %s.\n' "${DG_VERSION}" "${DG_TAG_SCANNER}"
+            printf '::error::On a same-repo pull_request event GitHub runs the workflow file from the pull request head, so on this event the workflow file belongs to the pull request. An older scanner here would let a change choose the rules it is judged by.\n'
+            printf '::error::REMOVE the `version` input and this cannot happen: the default is the scanner this action tag ships. Pinning FORWARD is still accepted on a pull request: this rule assumes a newer scanner is at least as strict, and it does not bound how far forward you pin.\n'
+            exit 1
+          fi
+        fi
+
         case "${DG_ONLINE}" in
           true|false) ;;
           *)
