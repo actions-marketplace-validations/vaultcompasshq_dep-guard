@@ -192,10 +192,22 @@ runs:
         # file from the HEAD, so the `version:` input is written by the pull
         # request being judged. The shape check above proves the input names a
         # version and says nothing about WHICH one: every published version
-        # clears it. That is shut today only by coincidence, because exactly one
-        # scanner has been published. The day a 0.7.0 scanner ships with new
-        # rules, a pull request pins 0.6.0, passes the shape check, and is
-        # judged by the older rule set it chose for itself.
+        # clears it, and nine are published, 0.1.0 through 0.6.0.
+        #
+        # WHAT ALREADY STOPS A BACKWARD PIN TODAY is not the shape check but a
+        # FLAG. `--trust-base` arrived in the 0.6.0 scanner, the run step
+        # appends it on every pull-request run and offers no opt-out, and a
+        # scanner at or below 0.5.0 answers `error: unknown option
+        # '--trust-base'`. So a pull request pinning 0.5.0 today already fails
+        # the job -- at the scan, several steps later, with a message about an
+        # unknown option rather than about what the pin was doing. This rule
+        # moves that failure up to the validate step and names the cause. It is
+        # a de facto flag-compatibility floor at 0.6.0, and the rule makes it
+        # explicit instead of leaving it to be discovered.
+        #
+        # The day a 0.7.0 scanner ships with new rules, a pull request pins
+        # 0.6.0, which knows `--trust-base` and runs cleanly, and is judged by
+        # the older rule set it chose for itself.
         #
         # This is the same class of hole as `trust-base: off`, refused by name a
         # few checks below for exactly this reason. The difference is what a

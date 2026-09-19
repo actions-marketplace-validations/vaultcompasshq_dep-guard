@@ -24,13 +24,19 @@ GitHub release notes, which are generated from the commit history.
   on it was a SHAPE check: it proves the value names a version and says nothing
   about which one, so every published version cleared it.
 
-  That was shut only by coincidence, because exactly one scanner has ever been
-  published. The day a 0.7.0 scanner ships with new rules, a pull request pins
-  `version: 0.6.0`, passes the shape check, and is judged by the older rule set
-  it chose for itself. It is the same class of hole as `trust-base: off`, which
-  this action already refuses by name. The difference is what a reviewer sees:
-  deleting a security step reads as deleting a security step, while
-  `version: 0.6.0` reads as ordinary version management.
+  Nine scanners are published, 0.1.0 through 0.6.0. What stops a backward pin
+  today is not that check but a FLAG: `--trust-base` arrived in the 0.6.0
+  scanner, the Action's run step appends it on every pull-request run with no
+  opt-out, and a scanner at or below 0.5.0 answers `error: unknown option
+  '--trust-base'`. A backward pin therefore already fails the job, at the scan,
+  with a message about an unknown option rather than about what the pin was
+  doing. This rule moves that failure up to the validate step and names the
+  cause. The day a 0.7.0 scanner ships with new rules, a pull request pins
+  `version: 0.6.0`, which knows `--trust-base` and runs cleanly, and is judged
+  by the older rule set it chose for itself. It is the same class of hole as
+  `trust-base: off`, which this action already refuses by name. The difference
+  is what a reviewer sees: deleting a security step reads as deleting a
+  security step, while `version: 0.6.0` reads as ordinary version management.
 
   On pull-request events the validate step now refuses a `version` below the
   scanner this Action tag ships, naming both numbers and pointing at the fix,
@@ -44,10 +50,15 @@ GitHub release notes, which are generated from the commit history.
   feature branch runs that branch's own workflow file, written by the same
   author, and is as author-controlled as a pull request. It is not covered.
 
-  **This costs consumers nothing today.** The tag scanner equals the only
-  published scanner, `0.6.0`, so every workflow that passes the shape check on
-  a pull request today passes this too. It starts costing something the first
-  time two scanner versions exist.
+  **What this costs, and the migration.** Nine scanners are published, so a
+  workflow pinning any of `0.1.0` through `0.5.0` passes the shape check on a
+  pull request today and is refused by v0.6.4 at the validate step. Such a pin
+  is already broken on that event, because those scanners do not know
+  `--trust-base` and the run step always passes it; what changes is that the
+  job now fails earlier with a message saying why. **If you pin `version` below
+  `0.6.0`: remove the `version` input, which is the pin you want because the
+  default is the scanner this Action tag ships, or raise it to `0.6.0` or
+  newer.** A pin at or above `0.6.0` is unaffected, and so is every push run.
 
   **The comparison is against a constant of its own,** `DG_TAG_SCANNER` in
   `action.yml`, not against anything derived from an input: `inputs.version`

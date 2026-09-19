@@ -309,12 +309,17 @@ refused with a message saying so.
 
 **On a pull request, `version` may not pin BACKWARD.** The shape check above
 proves the value names a version and says nothing about which one, so every
-published version clears it. That is shut today only by coincidence, because
-exactly one scanner has been published. On a same-repo `pull_request` event
-GitHub runs the workflow file from the pull request HEAD, so the `version:`
-input is written by the pull request being judged: the day a newer scanner
-ships with new rules, a pull request pins the old one and is judged by the rule
-set it chose for itself. That is the same hole `trust-base: off` was refused
+published version clears it, and nine are published (0.1.0 through 0.6.0).
+What stops a backward pin today is not that check but a flag: `--trust-base`
+arrived in the 0.6.0 scanner, the run step appends it on every pull-request run
+with no opt-out, and a scanner at or below 0.5.0 answers `error: unknown option
+'--trust-base'`. So such a pin already fails the job, at the scan, with a
+message about an unknown option instead of about the pin. This rule moves the
+failure up to the validate step and names the cause. On a same-repo
+`pull_request` event GitHub runs the workflow file from the pull request HEAD,
+so the `version:` input is written by the pull request being judged: the day a
+newer scanner ships with new rules, a pull request pins the old one and is
+judged by the rule set it chose for itself. That is the same hole `trust-base: off` was refused
 for, except that deleting a security step reads as deleting a security step
 while a version pin reads as version management.
 
@@ -323,7 +328,12 @@ the tag ships, and accepts anything at or above it.** Pinning forward is still
 allowed there, on an assumption the rule does not enforce: that a newer scanner
 is at least as strict. Nothing bounds a forward pin. The comparison is against
 a constant in `action.yml`, which comes from the ref your workflow's `uses:`
-names rather than from the pull request's tree.
+names rather than from the pull request's tree. That holds when your workflow
+names this action by owner and ref; if it names a LOCAL PATH instead, the
+`./some/dir` form, `action.yml` is read out of the pull request's own tree, so
+the constant is author-controlled there and this rule protects nothing.
+Self-testing workflows inside this repository are the usual reason to
+reference it that way.
 
 The rule fires exactly where `GITHUB_BASE_REF` is set, which is `pull_request`
 and `pull_request_target`. Push runs are out of scope. That is a statement of
@@ -332,17 +342,21 @@ branch's own workflow file, written by the same author, so it is as
 author-controlled as a pull request and is not covered.
 
 The refusal names both numbers and the fix, which is to **remove the `version`
-input**. It costs nothing today: the tag scanner equals the only published
-scanner, `0.6.0`.
+input**. What it costs: nine scanners are published, so a workflow pinning any
+of `0.1.0` through `0.5.0` passes the shape check on a pull request today and
+is refused by this rule. Such a pin is already broken on that event, since
+those scanners do not know `--trust-base`; the change is that the job fails at
+the validate step with a message saying why. **Remove the `version` input, or
+raise it to `0.6.0` or newer.**
 
 **What it does not cover, and what it costs on forks.** A fork's
 `pull_request` run uses the base repository's workflow file, so a fork author
 never writes the `version:` that judges them and there is no hole there to
 close. The rule still fires on that run: `GITHUB_BASE_REF` is set on a fork
 pull request too, so the check runs and judges your own trusted workflow file.
-Once a newer scanner exists, a backward pin you deliberately wrote in the base
-workflow will fail every fork pull request, which is a refusal on a pin nobody
-untrusted wrote. If you need that pin, remove the `version:` input or raise it.
+A backward pin you deliberately wrote in the base workflow will fail every fork
+pull request, which is a refusal on a pin nobody untrusted wrote. If you need
+that pin, remove the `version:` input or raise it.
 
 What this does not cover either is the workflow file itself, which a pull
 request can edit like any other CI step: it does not stop a pull request

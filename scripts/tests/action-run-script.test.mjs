@@ -33,6 +33,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { loadAction } from '../lib/action-steps.mjs';
+import { readActionVersionDefault } from '../lib/release-kind.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 // Overridable so a mutation run can point the whole suite at a deliberately
@@ -736,13 +737,16 @@ function tagScannerPart(part) {
 // version: the action as it will be the day a 0.7.0 scanner ships and this tag
 // starts shipping it.
 //
-// This exists because TODAY the tag scanner equals the only published scanner,
-// so no legal `version` input lands below it and the pull-request rule has no
-// visible effect on the shipped file. Driving the real step text with a future
-// constant is the only way to exercise the comparison itself now, and it is not
-// a weakened program: every line of the check is the shipped one. The
-// replacement is asserted to have MATCHED, so deleting or renaming the constant
-// turns this red rather than silently testing the unmodified script.
+// This is NOT here because the rule is invisible on the shipped file. It is
+// visible: eight scanners are published below the tag scanner (0.1.0 through
+// 0.5.0), and the first case in the block below drives the unmodified step with
+// `version: 0.5.9` and watches it refuse. The future constant exists to exercise the comparison
+// at a boundary the published set cannot reach today, one where the refused
+// version is itself in the 0.6.x family and so the minor and patch legs of the
+// comparison do the work. It is not a weakened program: every line of the check
+// is the shipped one. The replacement is asserted to have MATCHED, so deleting
+// or renaming the constant turns this red rather than silently testing the
+// unmodified script.
 function scriptWithFutureTagScanner() {
   const script = extractRunScript(VALIDATE_STEP);
   const future = script.replace(
@@ -754,6 +758,31 @@ function scriptWithFutureTagScanner() {
 }
 
 describe('action.yml "Validate inputs", pinning the scanner backward on a pull request', () => {
+  test('refuses a below-tag pin on a pull request, on the SHIPPED file', () => {
+    // The rule is observable on the unmodified action, so this case proves it
+    // there rather than on a future-constant copy. Nine scanners are published,
+    // 0.1.0 through 0.6.0, so eight of them sit below the tag scanner and every
+    // one clears the shape check. `0.5.9` stands in for that whole family: a
+    // well-formed version, below the constant, refused.
+    //
+    // Such a pin is ALREADY broken on a pull request, because `--trust-base`
+    // arrived in the 0.6.0 scanner and the run step passes it on every
+    // pull-request run with no opt-out, so an older scanner answers with an
+    // unknown-option error at the scan. What this rule changes is WHERE and
+    // WHY it fails: at validate, naming the pin.
+    const refused = runValidateWith({ version: '0.5.9' }, { GITHUB_BASE_REF: 'main' });
+    expect(refused.status).not.toBe(0);
+    // Both numbers, for the same reason the npm floor names both.
+    expect(refused.stdout).toContain('0.5.9');
+    expect(refused.stdout).toContain('0.6.0');
+    expect(refused.stdout).toContain('pull request');
+    expect(refused.stdout).toContain('REMOVE the `version` input');
+
+    // And the same input off the pull-request event is accepted, which is what
+    // makes the refusal above a property of the EVENT and not of the value.
+    expect(runValidateWith({ version: '0.5.9' }, {}).status).toBe(0);
+  });
+
   test('refuses a pull request that asks for an older scanner than the tag ships', () => {
     // THE HOLE THIS CLOSES. On a same-repo `pull_request` event GitHub runs the
     // workflow file from the HEAD, so the `version:` input is written by the
@@ -846,9 +875,32 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
       ).version;
       expect([pkg, tagScanner]).toEqual([pkg, version]);
     }
-    const defaultAt = /default:\s*(\S+)\s*\n\s*path:/.exec(actionYml);
-    expect(defaultAt).not.toBeNull();
-    expect(defaultAt[1]).toBe(tagScanner);
+    // Read with the release gate's own reader, which is scoped to the `inputs:`
+    // block and keyed on the `version:` input. An earlier version of this line
+    // matched whichever `default:` happened to sit directly above `path:`,
+    // which is a POSITIONAL claim, not a claim about the version input:
+    // inserting a new input between the two with its own `default: 0.6.0` left
+    // this case green while the real default had drifted to 0.9.9.
+    expect(readActionVersionDefault(actionYml)).toBe(tagScanner);
+  });
+
+  test('keeps the shape check and the re-match byte-identical', () => {
+    // The re-match inside the pull-request gate exists so a reader repairing
+    // the shape check cannot silently empty BASH_REMATCH out from under this
+    // block. Its "internal error" branch is UNREACHABLE, and the reason is
+    // precisely that the two patterns are the same program run on the same
+    // unchanged variable. Nothing but this assertion enforces "the same".
+    // Change one character of either and the branch becomes reachable, which
+    // means a value the shape check admitted would be refused as an internal
+    // error, or -- the direction that matters -- a value the shape check
+    // refused could be parsed differently here.
+    const script = extractRunScript(VALIDATE_STEP);
+    const patterns = script.match(/=~ (\^\(0\|\[1-9\]\[0-9\]\*\)[^\s]*\$)/g) ?? [];
+    // Two and exactly two: the shape check and the re-match. A third would be
+    // a third idea of what a version is, and a first-only match would mean one
+    // of them had been rewritten past recognition.
+    expect(patterns.length).toBe(2);
+    expect(patterns[0]).toBe(patterns[1]);
   });
 
   test('writes the pull-request check accept-only-if, after the version shape check', () => {
@@ -870,10 +922,14 @@ describe('action.yml "Validate inputs", pinning the scanner backward on a pull r
     // The event test is the one the run step already uses for `--trust-base`
     // under `auto`, not a second detector invented here, and it wraps the new
     // check rather than sitting somewhere else in the step. Bounded at BOTH
-    // ends on purpose: a search of the whole file finds the run step's own copy
-    // of the same idiom, and a search bounded only at the start finds the
-    // validate step's later use of the variable, so a deleted gate passed an
-    // earlier draft of this assertion.
+    // ends, for two different reasons. The LOWER bound is what the assertion
+    // needs today: a search of the whole file would find the run step's own
+    // copy of the same idiom, which lives in a different step entirely and
+    // would satisfy a gate that had been deleted from this one. The UPPER bound
+    // is insurance rather than a live need -- the validate step uses
+    // GITHUB_BASE_REF exactly once, and it is this gate -- but a second use
+    // added below the flag initialisation later would otherwise stand in for a
+    // deleted gate. As written, deleting the gate turns this case red.
     const gateAt = code.indexOf('-n "${GITHUB_BASE_REF:-}"', shapeAt);
     expect(gateAt).toBeGreaterThan(shapeAt);
     expect(gateAt).toBeLessThan(initAt);
