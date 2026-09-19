@@ -15,7 +15,13 @@ import { computeDelta } from './delta.js';
 import type { DepChange, DependencyDelta } from './delta.js';
 import { fingerprintFinding } from './fingerprint.js';
 import { evaluateGate, severityAtLeast } from './gate.js';
-import { assertScannablePath, loadStates, matchGlobPath, resolveScanRoot } from './git-source.js';
+import {
+  assertScannablePath,
+  loadStates,
+  matchGlobPath,
+  probeManifestOnDisk,
+  resolveScanRoot,
+} from './git-source.js';
 import type { ScanMode } from './git-source.js';
 import { loadTrustedControls } from './trust-base.js';
 import type { ControlShapeChange, TrustedControls } from './trust-base.js';
@@ -641,6 +647,51 @@ export async function scan(opts: {
   const config = applyFailOnOverride(controls?.config ?? loadConfig(root), opts.failOn);
   const corpus = loadCorpus(opts.corpusDir ?? DEFAULT_CORPUS_DIR);
   const statePair = await loadStates(opts.repoRoot, opts.mode);
+
+  // Ported from a sibling scanner's whole-tree "examined zero files is
+  // could-not-run" invariant, adapted to dep-guard's own unit of work: a
+  // manifest, not a file. statePair.after is the side under judgment in
+  // every mode (the working tree for audit/base, the index for staged), so
+  // zero resolved manifests on it is the dep-guard analogue of a walk that
+  // opened nothing.
+  //
+  // Zero resolved manifests is ambiguous on its own, unlike that sibling
+  // scanner's zero-files case: it is both what a genuinely dependency-free
+  // repository looks like (legitimate, common, and must stay a clean pass --
+  // a repo with nothing to depend on has nothing to check) and what a
+  // misrooted or glob-missed scan looks like (a real manifest exists, but
+  // the resolver's rules -- a workspace glob, the git index, symlink
+  // containment -- never reached it). probeManifestOnDisk is a second,
+  // deliberately cruder, resolver-INDEPENDENT check that tells the two
+  // apart: only when it finds a manifest-shaped file that the real resolver
+  // did NOT is this could-not-run, never when both agree there is nothing.
+  //
+  // Deliberately excludes checkSingle(): that function never calls
+  // loadStates and has no "resolved manifests" of its own to be zero --
+  // its synthetic one-dependency delta is unconditional.
+  //
+  // Also deliberately excludes staged mode. statePair.after there is the
+  // git INDEX, not the working tree, so a package.json a developer just
+  // created but has not yet `git add`-ed is a legitimate, imposed-empty
+  // staged scope -- zero staged manifests is exactly what an empty index
+  // looks like, not evidence of a wrong scan root. probeManifestOnDisk
+  // reads the filesystem, which will disagree with the index the instant
+  // an untracked manifest exists, so running it here would misdiagnose a
+  // normal not-yet-staged file as a misrooted scan on every commit through
+  // the init pre-commit hook (`dep-guard scan --staged`). The sibling
+  // scanner makes this same exclusion for the same reason.
+  if (opts.mode.kind !== 'staged' && statePair.after.manifests.length === 0) {
+    const manifestOnDisk = await probeManifestOnDisk(root);
+    if (manifestOnDisk) {
+      throw new DepGuardError(
+        'found a manifest on disk but resolved none; the scan root may be wrong. In CI ' +
+          'this is a could-not-run, not a clean pass. Check that the action runs at the ' +
+          'repository root.',
+        'manifests-unresolved'
+      );
+    }
+  }
+
   const delta = computeDelta(statePair.before, statePair.after);
   // Left at this point in the sequence deliberately for the no-flag case:
   // moving the on-disk read earlier would change which error a repository
