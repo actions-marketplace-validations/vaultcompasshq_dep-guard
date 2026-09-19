@@ -111,7 +111,7 @@ function makeRunner(inputs = {}, npmVersion = '10.9.2') {
       // directory, which is the harness failing rather than the action, and it
       // would hide whether the verification runs at all.
       // A real npm answers `--version`, and the step now reads it: below
-      // 10.6.0 the verification calls a clean install tampered with. Written
+      // 10.5.2 the verification calls a clean install tampered with. Written
       // with `%b` so a test can hand it MULTIPLE lines and reproduce a client
       // printing an upgrade notice above its version, the shape that defeated
       // two earlier versions of the floor in a sibling repository.
@@ -337,7 +337,7 @@ describe('action.yml "Install dep-guard outside the workspace"', () => {
   });
 
   test('refuses an npm too old to verify, rather than calling a clean install tampered with', () => {
-    // `npm audit signatures` is not version-stable. Below 10.6.0 it fails on a
+    // `npm audit signatures` is not version-stable. Below 10.5.2 it fails on a
     // CLEAN install of these very packages: on 10.5.0 it says "Someone might
     // have tampered with these packages", naming ours; on 10.2.4 it is
     // EEXPIREDSIGNATUREKEY. Both false and both alarming.
