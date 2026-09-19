@@ -693,6 +693,23 @@ describe('scan', () => {
       expect(result.findings).toHaveLength(0);
       expect(result.exitCode).toBe(0);
     });
+
+    test('a staged scan with an untracked manifest on disk (not git added) stays a clean pass, not could-not-run', async () => {
+      // Staged mode's scope is the git index, not the filesystem -- a
+      // package.json that was created but never `git add`-ed is a
+      // legitimate, imposed-empty staged scope (the developer has not
+      // staged it yet), not a misrooted or glob-missed scan. Running
+      // probeManifestOnDisk here compares the index against the working
+      // tree, which will always disagree the moment an untracked manifest
+      // exists, so this check must not run in staged mode at all. The
+      // sibling scanner makes the same exclusion for the same reason.
+      await write('package.json', manifestJson({ react: '18.0.0' }));
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.exitCode).toBe(0);
+    });
   });
 });
 

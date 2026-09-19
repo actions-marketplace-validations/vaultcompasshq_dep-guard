@@ -669,7 +669,18 @@ export async function scan(opts: {
   // Deliberately excludes checkSingle(): that function never calls
   // loadStates and has no "resolved manifests" of its own to be zero --
   // its synthetic one-dependency delta is unconditional.
-  if (statePair.after.manifests.length === 0) {
+  //
+  // Also deliberately excludes staged mode. statePair.after there is the
+  // git INDEX, not the working tree, so a package.json a developer just
+  // created but has not yet `git add`-ed is a legitimate, imposed-empty
+  // staged scope -- zero staged manifests is exactly what an empty index
+  // looks like, not evidence of a wrong scan root. probeManifestOnDisk
+  // reads the filesystem, which will disagree with the index the instant
+  // an untracked manifest exists, so running it here would misdiagnose a
+  // normal not-yet-staged file as a misrooted scan on every commit through
+  // the init pre-commit hook (`dep-guard scan --staged`). The sibling
+  // scanner makes this same exclusion for the same reason.
+  if (opts.mode.kind !== 'staged' && statePair.after.manifests.length === 0) {
     const manifestOnDisk = await probeManifestOnDisk(root);
     if (manifestOnDisk) {
       throw new DepGuardError(

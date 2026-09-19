@@ -30,10 +30,23 @@ GitHub release notes, which are generated from the commit history.
 
   This scopes honestly to the case it actually catches: a manifest present
   on disk that the resolver's own rules (an undeclared workspace, a
-  --staged run whose index does not yet hold a newly created package.json,
-  a symlink that resolves outside the scan root) never reached. A wrong
-  scan root that still resolves at least one real manifest is not caught
-  here -- running at the repository root remains the primary protection.
+  symlink that resolves outside the scan root) never reached. A wrong scan
+  root that still resolves at least one real manifest is not caught here --
+  running at the repository root remains the primary protection.
+
+  **Staged mode (`--staged`, the mode the init pre-commit hook runs) is
+  excluded from this check.** In staged mode the state under judgment is
+  the git index, not the working tree, so a package.json a developer
+  created but has not yet run `git add` on is a legitimate, imposed-empty
+  staged scope, not a discovered-empty misroot -- the empty scope was
+  imposed by the index itself, the same way it is for an empty PR delta.
+  Running the on-disk probe there compared the index against the
+  filesystem and would misfire on every ordinary not-yet-staged file,
+  turning a routine commit into a could-not-run with a misleading "scan
+  root may be wrong" message. The sibling scanner makes this same
+  exclusion for the same reason; the check still runs unchanged for
+  whole-repo, base, and audit scans, where a discovered-empty result is
+  never an imposed scope.
 
 ## [0.6.4] - 2026-09-18
 
