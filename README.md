@@ -258,7 +258,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.6.3
+  - uses: vaultcompasshq/dep-guard@v0.6.4
     with:
       path: .
       online: 'true'
@@ -271,7 +271,7 @@ action tag then decides the scanner, and there is one pin to bump instead of
 two that can disagree.
 
 **The action tag and the scanner version are separate numbers, and they do not
-have to match.** `vaultcompasshq/dep-guard@v0.6.3` installs
+have to match.** `vaultcompasshq/dep-guard@v0.6.4` installs
 `@vaultcompass/dep-guard@0.6.0`, because that release changed the action and
 nothing in the scanner, so there was no new scanner to publish. Read the action
 tag as "which version of the workflow step", not as "which version of the
@@ -307,9 +307,48 @@ committed file away from the tree handing over its own scanner. **If you were
 relying on the old `latest` default, pin an exact version now**; a dist-tag is
 refused with a message saying so.
 
-What this does not cover is the workflow file itself, which a pull request can
-edit like any other CI step. Branch protection on the base branch, with review
-required for `.github/workflows/**`, is the control for that.
+**On a pull request, `version` may not pin BACKWARD.** The shape check above
+proves the value names a version and says nothing about which one, so every
+published version clears it. That is shut today only by coincidence, because
+exactly one scanner has been published. On a same-repo `pull_request` event
+GitHub runs the workflow file from the pull request HEAD, so the `version:`
+input is written by the pull request being judged: the day a newer scanner
+ships with new rules, a pull request pins the old one and is judged by the rule
+set it chose for itself. That is the same hole `trust-base: off` was refused
+for, except that deleting a security step reads as deleting a security step
+while a version pin reads as version management.
+
+**So on a pull-request event the Action refuses a `version` below the scanner
+the tag ships, and accepts anything at or above it.** Pinning forward is still
+allowed there, on an assumption the rule does not enforce: that a newer scanner
+is at least as strict. Nothing bounds a forward pin. The comparison is against
+a constant in `action.yml`, which comes from the ref your workflow's `uses:`
+names rather than from the pull request's tree.
+
+The rule fires exactly where `GITHUB_BASE_REF` is set, which is `pull_request`
+and `pull_request_target`. Push runs are out of scope. That is a statement of
+scope, not a safety argument: a push to an unprotected branch runs that
+branch's own workflow file, written by the same author, so it is as
+author-controlled as a pull request and is not covered.
+
+The refusal names both numbers and the fix, which is to **remove the `version`
+input**. It costs nothing today: the tag scanner equals the only published
+scanner, `0.6.0`.
+
+**What it does not cover, and what it costs on forks.** A fork's
+`pull_request` run uses the base repository's workflow file, so a fork author
+never writes the `version:` that judges them and there is no hole there to
+close. The rule still fires on that run: `GITHUB_BASE_REF` is set on a fork
+pull request too, so the check runs and judges your own trusted workflow file.
+Once a newer scanner exists, a backward pin you deliberately wrote in the base
+workflow will fail every fork pull request, which is a refusal on a pin nobody
+untrusted wrote. If you need that pin, remove the `version:` input or raise it.
+
+What this does not cover either is the workflow file itself, which a pull
+request can edit like any other CI step: it does not stop a pull request
+deleting the step, or moving the `uses:` pin to an older Action tag. Branch
+protection on the base branch, with review required for `.github/workflows/**`,
+is the control for that.
 
 `bench/action-install.mjs` proves the install boundary above against real npm:
 a committed `.npmrc` and a planted `node_modules` copy, run against two local

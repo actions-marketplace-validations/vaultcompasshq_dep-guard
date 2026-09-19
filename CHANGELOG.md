@@ -10,6 +10,63 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-09-18
+
+**An action-only release.** The npm packages stay at 0.6.0.
+`vaultcompasshq/dep-guard@v0.6.4` installs `@vaultcompass/dep-guard@0.6.0`.
+
+### Security
+
+- **On a pull request, the `version` input may no longer ask for a scanner
+  older than the one this action tag ships.** On a same-repo `pull_request`
+  event GitHub runs the workflow file from the pull request HEAD, so the
+  `version:` input is written by the pull request being judged. The only check
+  on it was a SHAPE check: it proves the value names a version and says nothing
+  about which one, so every published version cleared it.
+
+  That was shut only by coincidence, because exactly one scanner has ever been
+  published. The day a 0.7.0 scanner ships with new rules, a pull request pins
+  `version: 0.6.0`, passes the shape check, and is judged by the older rule set
+  it chose for itself. It is the same class of hole as `trust-base: off`, which
+  this action already refuses by name. The difference is what a reviewer sees:
+  deleting a security step reads as deleting a security step, while
+  `version: 0.6.0` reads as ordinary version management.
+
+  On pull-request events the validate step now refuses a `version` below the
+  scanner this Action tag ships, naming both numbers and pointing at the fix,
+  which is to remove the input. Pinning **forward** is still accepted there, on
+  an assumption the rule does not enforce: that a newer scanner is at least as
+  strict. Forward pins are not bounded.
+
+  **Where it fires** is exactly where `GITHUB_BASE_REF` is set, which is
+  `pull_request` and `pull_request_target`. Push runs are out of scope. That is
+  a scope statement, not a safety argument: a push run on an unprotected
+  feature branch runs that branch's own workflow file, written by the same
+  author, and is as author-controlled as a pull request. It is not covered.
+
+  **This costs consumers nothing today.** The tag scanner equals the only
+  published scanner, `0.6.0`, so every workflow that passes the shape check on
+  a pull request today passes this too. It starts costing something the first
+  time two scanner versions exist.
+
+  **The comparison is against a constant of its own,** `DG_TAG_SCANNER` in
+  `action.yml`, not against anything derived from an input: `inputs.version`
+  looks identical whether the consumer pinned it or the default supplied it, so
+  the step cannot tell a pin from a default. It is not the npm floor in the
+  install step either, which is a property of the npm CLIENT and has nothing to
+  say about the scanner. A test ties `DG_TAG_SCANNER`, the `version` input's
+  default and both published package versions to one number, because a constant
+  left BEHIND a published scanner would go on admitting the pin it exists to
+  refuse, and would do it quietly.
+
+  **What this does not cover:** forks, where the base repository's workflow
+  file runs, so a fork author never writes the `version:` that judges them (the
+  rule still fires on a fork pull request and judges the base workflow's own
+  pin, so a deliberate backward pin there refuses every fork run); and a pull
+  request that deletes the step or moves the `uses:` pin, for which branch
+  protection with required review on `.github/workflows/**` remains the
+  control.
+
 ## [0.6.3] - 2026-09-18
 
 **An action-only release, and a correction to v0.6.2.** The npm packages stay
