@@ -10,6 +10,16 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-19
+
+Minor on both published packages, per the stability policy: 0.x minors may
+change scanner behavior. `@vaultcompass/dep-guard` and
+`@vaultcompass/dep-guard-core` move from 0.6.0 to 0.7.0. The action's
+`version` input default and the `DG_TAG_SCANNER` constant move with them, so
+`vaultcompasshq/dep-guard@v0.7.0` installs `@vaultcompass/dep-guard@0.7.0` --
+tag and scanner are the same number again after the v0.6.1 through v0.6.4
+action-only releases moved the tag alone.
+
 ### Security
 
 - **A scan that resolves zero manifests while a manifest sits on disk now
