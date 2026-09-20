@@ -23,6 +23,12 @@ GitHub release notes, which are generated from the commit history.
   false-fail an otherwise-successful publish. CI-internal, no package version
   bump.
 
+- Pinned the transitive js-yaml dev dependency to 3.15.2+ via
+  pnpm.overrides to clear a high-severity advisory (CPU DoS on empty merge
+  sources). The dependency comes in through jest, babel-plugin-istanbul, and
+  @istanbuljs/load-nyc-config for test-coverage tooling only; it is not in
+  the published package. No package version bump.
+
 ## [0.7.0] - 2026-09-19
 
 Minor on both published packages, per the stability policy: 0.x minors may
