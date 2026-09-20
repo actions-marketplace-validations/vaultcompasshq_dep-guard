@@ -18,6 +18,11 @@ GitHub release notes, which are generated from the commit history.
   rule is documented flatly by GitHub; the "not guaranteed" hedge on the same
   page qualifies the separate CI variable exception, not this rule. Docs only.
 
+- Widened the release-smoke job's npm registry wait window from about 2
+  minutes to about 5 minutes, so ordinary registry propagation lag does not
+  false-fail an otherwise-successful publish. CI-internal, no package version
+  bump.
+
 ## [0.7.0] - 2026-09-19
 
 Minor on both published packages, per the stability policy: 0.x minors may
