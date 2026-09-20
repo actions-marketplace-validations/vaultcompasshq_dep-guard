@@ -157,6 +157,9 @@ runs:
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         DG_UPLOAD: ${{ inputs.upload-sarif }}
         DG_TRUST_BASE: ${{ inputs.trust-base }}
+        # Declared from the event payload so the value can't come from the
+        # workflow file even if the platform guarantee failed.
+        GITHUB_BASE_REF: ${{ github.base_ref }}
       run: |
         set -euo pipefail
 

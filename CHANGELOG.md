@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- The Validate inputs step now declares GITHUB_BASE_REF from the event
+  payload in its env mapping, so the pull-request test cannot come from the
+  workflow file even if the platform no-overwrite guarantee failed.
+
 - Corrected a quote in docs/INVARIANTS.md: the GITHUB_*/RUNNER_* no-overwrite
   rule is documented flatly by GitHub; the "not guaranteed" hedge on the same
   page qualifies the separate CI variable exception, not this rule. Docs only.
