@@ -614,6 +614,18 @@ function runValidateWith(inputs, extraEnv = {}) {
   return runValidateScript(extractRunScript(VALIDATE_STEP), inputs, extraEnv);
 }
 
+describe('action.yml "Validate inputs", env mapping', () => {
+  test('reads the validate step from the environment rather than expanding expressions into a script', () => {
+    // An expression expanded inside a run block is pasted in as source text
+    // before the shell sees it. The expressions live only in the env: mapping.
+    expect(extractRunScript(VALIDATE_STEP)).not.toMatch(/\$\{\{/);
+  });
+
+  test('declares the pull-request test from the event payload', () => {
+    expect(action.extractStepEnv(VALIDATE_STEP).GITHUB_BASE_REF).toBe('${{ github.base_ref }}');
+  });
+});
+
 describe('action.yml "Validate inputs", trust-base', () => {
   const runValidate = (trustBase) => runValidateWith({ 'trust-base': trustBase });
 

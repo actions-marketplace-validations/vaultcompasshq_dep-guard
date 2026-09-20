@@ -102,6 +102,16 @@ describe('cwdForStep', () => {
     expect(action.cwdForStep('With Working Dir', { workspace: '/ws' })).toBe('/somewhere/else');
   });
 
+  it('evaluates github.base_ref as empty unless the caller named one', () => {
+    dir = mkdtempSync(path.join(tmpdir(), 'action-steps-test-'));
+    const action = loadAction(writeFixtureAction(dir));
+    const ctx = { inputs: {}, runnerTemp: '/tmp', workspace: '/ws' };
+    expect(action.evaluateTemplate('${{ github.base_ref }}', ctx)).toBe('');
+    expect(action.evaluateTemplate('${{ github.base_ref }}', { ...ctx, baseRef: 'main' })).toBe(
+      'main'
+    );
+  });
+
   it('defaults to the workspace -- the UNSAFE default -- when no working-directory is declared', () => {
     // The default has to be the unsafe one on purpose: a caller that defaulted
     // somewhere safe would report a step as isolated that is not. This is
