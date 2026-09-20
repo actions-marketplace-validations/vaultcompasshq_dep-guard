@@ -534,13 +534,13 @@ jobs:
           echo "Smoke testing @vaultcompass/dep-guard@${VERSION}"
 
           FOUND=0
-          for i in $(seq 1 12); do
+          for i in $(seq 1 30); do
             if [[ "$(npm view "@vaultcompass/dep-guard@${VERSION}" version 2>/dev/null)" == "${VERSION}" ]]; then
               echo "Package visible on registry."
               FOUND=1
               break
             fi
-            echo "Waiting for npm registry (attempt ${i}/12)..."
+            echo "Waiting for npm registry (attempt ${i}/30)..."
             sleep 10
           done
           if [[ "${FOUND}" -ne 1 ]]; then
