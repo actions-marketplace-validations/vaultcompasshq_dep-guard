@@ -2005,13 +2005,14 @@ Four properties, each load-bearing:
   recording, because a same-repo pull request's author writes the workflow file
   and the obvious bypass is therefore `env: GITHUB_BASE_REF: ""` at job level.
   Quote the page at the strength it actually claims: "You can't overwrite the
-  value of the default environment variables named GITHUB_* and RUNNER_*", to
-  which it immediately adds "However, it's not guaranteed that this will always
-  be possible." So this is a documented behaviour with a hedge on it, not a
-  platform promise, and the guarantee should be read as strong-by-default
-  rather than absolute. The same page confirms the other half relied on here,
-  that `GITHUB_BASE_REF` is set only on `pull_request` and
-  `pull_request_target` events
+  value of the default environment variables named GITHUB_* and RUNNER_*." That
+  line is stated flatly, with no hedge attached to it. The hedge on the same
+  page ("However, it's not guaranteed that this will always be possible")
+  qualifies a different rule, the CI variable exception, not the GITHUB_*/
+  RUNNER_* no-overwrite rule this invariant relies on. So the guarantee relied
+  on here is a documented platform promise, not a hedged one. The same page
+  confirms the other half relied on here, that `GITHUB_BASE_REF` is set only on
+  `pull_request` and `pull_request_target` events
   (https://docs.github.com/en/actions/reference/workflows-and-actions/variables).
 - Written accept-only-if, not refuse-if, for the same reason as the npm floor:
   `[` returns 2 on a malformed comparison and an `if` reads 2 as false, so a

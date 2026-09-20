@@ -10,6 +10,10 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- Corrected a quote in docs/INVARIANTS.md: the GITHUB_*/RUNNER_* no-overwrite
+  rule is documented flatly by GitHub; the "not guaranteed" hedge on the same
+  page qualifies the separate CI variable exception, not this rule. Docs only.
+
 ## [0.7.0] - 2026-09-19
 
 Minor on both published packages, per the stability policy: 0.x minors may
