@@ -12,11 +12,12 @@ GitHub release notes, which are generated from the commit history.
 
 - The release-kind classifier now takes a packages[] list, the same shape
   vault-guard 1.8.0 uses on main (scripts/lib/release-kind.mjs as of
-  c166862). The older core/cli field pair and CLI flags still work. The
-  CHANGELOG heading check is a literal "## [X.Y.Z]" prefix match, not a
-  regex built from the tag, so CodeQL no longer flags it and
-  "## [0.6.10]" cannot satisfy a search for 0.6.1. No change to how the
-  current two-package layout is classified.
+  c166862). The CHANGELOG heading check is a literal "## [X.Y.Z]" prefix
+  match, not a regex built from the tag, so CodeQL no longer flags it and
+  "## [0.6.10]" cannot satisfy a search for 0.6.1. The heading match is
+  now exactly "## [" with one space (stricter) and tolerates leading
+  whitespace on the line (looser), both matching vault-guard. No change
+  to how the current two-package layout is classified.
 
 ## [0.7.1] - 2026-09-20
 

@@ -12,10 +12,9 @@
 //
 // The classify API is the vault-guard packages[] shape (vault-guard 1.8.0
 // on main, scripts/lib/release-kind.mjs as of c166862): every published
-// package is one {name, version} entry. The older core/cli field pair is
-// still accepted so existing callers keep working. Lockstep, the five
-// action-only conditions, and the package-release default check are
-// unchanged for the current two-package layout.
+// package is one {name, version} entry. Lockstep, the five action-only
+// conditions, and the package-release default check are unchanged for the
+// current two-package layout.
 //
 // The property the old assertion bought has to survive admitting the
 // second shape: a mistyped or mis-pointed tag must never publish anything,
@@ -197,39 +196,14 @@ function assertPackageReleaseDefault({ version, actionYmlText, refDescription })
 }
 
 /**
- * Vault-guard's packages[] shape, with the older core/cli pair accepted so
- * existing callers keep working. An explicit empty packages[] is empty,
- * not a cue to fall back.
- */
-function resolvePackages({ packages, coreName, coreVersion, cliName, cliVersion }) {
-  if (Array.isArray(packages)) {
-    return packages;
-  }
-  if (
-    coreName === undefined &&
-    coreVersion === undefined &&
-    cliName === undefined &&
-    cliVersion === undefined
-  ) {
-    return [];
-  }
-  return [
-    { name: coreName, version: coreVersion },
-    { name: cliName, version: cliVersion },
-  ];
-}
-
-/**
  * @param {object} input
  * @param {string|null} input.tagName        the pushed tag, or null on workflow_dispatch
  * @param {string} input.refDescription      how to name this ref in an error message
- * @param {{name: string, version: string}[]} [input.packages]
- *        every package this repository publishes to npm. Preferred shape,
- *        matching vault-guard. Must be non-empty when provided.
- * @param {string} [input.coreName]          older two-field form: core npm name
- * @param {string} [input.coreVersion]       older two-field form: packages/core version
- * @param {string} [input.cliName]           older two-field form: cli npm name
- * @param {string} [input.cliVersion]        older two-field form: packages/cli version
+ * @param {{name: string, version: string}[]} input.packages
+ *        every package this repository publishes to npm, in the order the
+ *        workflow reads them. Must be non-empty. All must carry the same
+ *        version -- that lockstep is the first thing checked, before the
+ *        tag is even looked at.
  * @param {string} input.actionYmlText       the contents of action.yml at this commit
  * @param {string|null} input.changelogText  the contents of CHANGELOG.md at this
  *        commit, or null if it could not be read
@@ -242,22 +216,11 @@ function resolvePackages({ packages, coreName, coreVersion, cliName, cliVersion 
 export function classifyRelease({
   tagName,
   refDescription,
-  packages: packagesInput,
-  coreName,
-  coreVersion,
-  cliName,
-  cliVersion,
+  packages,
   actionYmlText,
   changelogText,
   publishedVersion,
 }) {
-  const packages = resolvePackages({
-    packages: packagesInput,
-    coreName,
-    coreVersion,
-    cliName,
-    cliVersion,
-  });
   if (!Array.isArray(packages) || packages.length === 0) {
     throw new Error('classifyRelease requires at least one package (packages/*/package.json).');
   }

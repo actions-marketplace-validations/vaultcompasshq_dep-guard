@@ -17,10 +17,6 @@
 //     --package @vaultcompass/dep-guard=0.6.0 \
 //     [--action-yml action.yml] [--changelog CHANGELOG.md]
 //
-// The older --core-name/--core-version/--cli-name/--cli-version pair is
-// still accepted and becomes a two-entry packages[] so existing callers
-// keep working.
-//
 // Omit --tag for a workflow_dispatch run, which has no tag: the lockstep
 // check still runs and the answer is always a package release.
 //
@@ -44,16 +40,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const REGISTRY = 'https://registry.npmjs.org';
 
-const SINGLE_FLAGS = [
-  '--tag',
-  '--action-yml',
-  '--changelog',
-  '--core-name',
-  '--core-version',
-  '--cli-name',
-  '--cli-version',
-];
-const LEGACY_REQUIRED = ['--core-name', '--core-version', '--cli-name', '--cli-version'];
+const SINGLE_FLAGS = ['--tag', '--action-yml', '--changelog'];
 
 function parseArgs(argv) {
   const single = new Map();
@@ -86,14 +73,7 @@ function parseArgs(argv) {
     i += 1;
   }
   if (packages.length === 0) {
-    const missing = LEGACY_REQUIRED.filter((flag) => !single.has(flag));
-    if (missing.length > 0) {
-      throw new Error(`missing required argument(s): ${missing.join(', ')}.`);
-    }
-    packages.push(
-      { name: single.get('--core-name'), version: single.get('--core-version') },
-      { name: single.get('--cli-name'), version: single.get('--cli-version') },
-    );
+    throw new Error('at least one --package name=version is required.');
   }
   return { single, packages };
 }

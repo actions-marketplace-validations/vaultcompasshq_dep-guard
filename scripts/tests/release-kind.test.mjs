@@ -41,6 +41,13 @@ const SCRIPT = path.join(ROOT, 'scripts', 'classify-release-tag.mjs');
 const CORE_NAME = '@vaultcompass/dep-guard-core';
 const CLI_NAME = '@vaultcompass/dep-guard';
 
+function packagesAt(version, overrides = {}) {
+  return [
+    { name: CORE_NAME, version: overrides[CORE_NAME] ?? version },
+    { name: CLI_NAME, version: overrides[CLI_NAME] ?? version },
+  ];
+}
+
 // A stand-in action.yml whose description block deliberately contains the
 // string "default:" and a version-shaped number in prose. The real file's
 // version input carries a long block scalar that names example versions,
@@ -94,10 +101,7 @@ function actionOnlyInputs(overrides = {}) {
   return {
     tagName: 'v0.6.1',
     refDescription: 'tag v0.6.1',
-    coreName: CORE_NAME,
-    coreVersion: '0.6.0',
-    cliName: CLI_NAME,
-    cliVersion: '0.6.0',
+    packages: packagesAt('0.6.0'),
     actionYmlText: actionYmlWith('0.6.0'),
     changelogText: changelogWith('0.6.1', '0.6.0'),
     publishedVersion: registryStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]),
@@ -229,9 +233,12 @@ describe('the real CHANGELOG.md', () => {
     ).version;
     const changelog = readFileSync(path.join(ROOT, 'CHANGELOG.md'), 'utf8');
 
-    // The same pattern classifyRelease builds, against the version the
-    // packages actually carry rather than a number written down here.
-    expect(changelog).toMatch(new RegExp(`^##\\s*\\[${version.replace(/\./g, '\\.')}\\]`, 'm'));
+    // The same check classifyRelease does, against the version the
+    // packages actually carry rather than a number written down here: a
+    // trimmed line starting with the literal "## [" + version + "]", no
+    // regex built from the version string at all.
+    const hasHeading = changelog.split('\n').some((line) => line.trim().startsWith(`## [${version}]`));
+    expect(hasHeading).toBe(true);
   });
 });
 
@@ -279,8 +286,7 @@ describe('classifyRelease', () => {
         actionOnlyInputs({
           tagName: 'v0.9.0',
           refDescription: 'tag v0.9.0',
-          coreVersion: '0.10.0',
-          cliVersion: '0.10.0',
+          packages: packagesAt('0.10.0'),
           actionYmlText: actionYmlWith('0.10.0'),
           publishedVersion: registryStub([`${CORE_NAME}@0.10.0`, `${CLI_NAME}@0.10.0`]),
         })
@@ -353,8 +359,7 @@ describe('classifyRelease', () => {
         actionOnlyInputs({
           tagName: 'v0.7.0',
           refDescription: 'tag v0.7.0',
-          coreVersion: '0.7.0',
-          cliVersion: '0.7.0',
+          packages: packagesAt('0.7.0'),
           actionYmlText: actionYmlWith('0.6.0'),
         })
       )
@@ -366,8 +371,7 @@ describe('classifyRelease', () => {
       actionOnlyInputs({
         tagName: 'v0.7.0',
         refDescription: 'tag v0.7.0',
-        coreVersion: '0.7.0',
-        cliVersion: '0.7.0',
+        packages: packagesAt('0.7.0'),
         actionYmlText: actionYmlWith('0.7.0'),
       })
     );
@@ -382,8 +386,7 @@ describe('classifyRelease', () => {
       actionOnlyInputs({
         tagName: 'v0.7.0-rc.1',
         refDescription: 'tag v0.7.0-rc.1',
-        coreVersion: '0.7.0-rc.1',
-        cliVersion: '0.7.0-rc.1',
+        packages: packagesAt('0.7.0-rc.1'),
         actionYmlText: actionYmlWith('0.6.0'),
       })
     );
@@ -455,7 +458,7 @@ describe('classifyRelease', () => {
   it('fails when core and cli versions disagree, before anything else is considered', () => {
     const publishedVersion = registryStub([]);
     expect(() =>
-      classifyRelease(actionOnlyInputs({ cliVersion: '0.5.0', publishedVersion }))
+      classifyRelease(actionOnlyInputs({ packages: packagesAt('0.6.0', { [CLI_NAME]: '0.5.0' }), publishedVersion }))
     ).toThrow(/lockstep/i);
     expect(publishedVersion.calls).toEqual([]);
   });
@@ -482,7 +485,7 @@ describe('classifyRelease', () => {
         ...actionOnlyInputs(),
         tagName: null,
         refDescription: 'branch main (not a tag push)',
-        cliVersion: '0.5.0',
+        packages: packagesAt('0.6.0', { [CLI_NAME]: '0.5.0' }),
       })
     ).toThrow(/lockstep/i);
   });
@@ -491,8 +494,7 @@ describe('classifyRelease', () => {
     expect(() =>
       classifyRelease(
         actionOnlyInputs({
-          coreVersion: '0.6.0-rc.1',
-          cliVersion: '0.6.0-rc.1',
+          packages: packagesAt('0.6.0-rc.1'),
           actionYmlText: actionYmlWith('0.6.0'),
         })
       )
@@ -777,6 +779,8 @@ describe('.github/workflows/release.yml wiring', () => {
     const packageFlags = workflow.match(/--package "/g) ?? [];
     // Two packages, two invocations (tag push and workflow_dispatch).
     expect(packageFlags).toHaveLength(4);
+    expect(workflow).toContain('--package "${CORE_NAME}=${CORE_VERSION}"');
+    expect(workflow).toContain('--package "${CLI_NAME}=${CLI_VERSION}"');
   });
 
   it('keeps the decision step and the "Publish to npm" loop in the same set of packages', () => {
@@ -855,14 +859,10 @@ describe('classify-release-tag.mjs', () => {
 
   const baseArgs = (tag) => [
     ...(tag === null ? [] : ['--tag', tag]),
-    '--core-name',
-    CORE_NAME,
-    '--core-version',
-    '0.6.0',
-    '--cli-name',
-    CLI_NAME,
-    '--cli-version',
-    '0.6.0',
+    '--package',
+    `${CORE_NAME}=0.6.0`,
+    '--package',
+    `${CLI_NAME}=0.6.0`,
   ];
 
   function withActionYml(defaultVersion) {
@@ -981,7 +981,7 @@ describe('classify-release-tag.mjs', () => {
   it('exits 1 when a required argument is missing', () => {
     const result = run(['--tag', 'v0.6.1'], {});
     expect(result.status).toBe(1);
-    expect(result.stdout + result.stderr).toMatch(/--core-name/);
+    expect(result.stdout + result.stderr).toMatch(/--package/);
   });
 
   it('accepts --package name=version the same way vault-guard does', () => {

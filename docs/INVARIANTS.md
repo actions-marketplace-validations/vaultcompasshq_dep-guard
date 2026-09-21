@@ -2201,6 +2201,15 @@ real `action.yml` and the real `CHANGELOG.md`, so a moved default or a
 reformatted heading goes red in the pull request that does it rather than at
 tag time.
 
+Releases classify from a `packages[]` list in lockstep: every published
+package must carry the same version, checked before the tag is looked at
+(`scripts/lib/release-kind.mjs`). The CHANGELOG heading match is a literal
+`## [X.Y.Z]` prefix on a trimmed line, one space after `##`, never a regex
+built from the version. The canary in `scripts/tests/release-kind.test.mjs`
+("the real CHANGELOG.md") uses that same `trim().startsWith` check against
+the current package version, so a heading reformatted to two spaces after
+`##` goes red in the pull request that does it.
+
 They are allowed to differ, and an action-only release is the normal reason:
 nothing in the scanner changed, so publishing a new scanner purely to keep two
 strings matching would burn a version through a one-way trusted-publisher
