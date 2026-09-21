@@ -10,17 +10,18 @@
 // -- and v0.6.1 was the first release where they did: action.yml, README,
 // CHANGELOG and docs moved, the packages stayed at 0.6.0.
 //
-// The release workflow's version assertion knew only one shape, "the tag
-// must read v plus the package version", so that tag push went red before
-// install, build or publish. Nothing was published, which was right, but
-// the tag got no Release page and every future action-only tag would have
-// failed the same way.
+// The classify API is the vault-guard packages[] shape (vault-guard 1.8.0
+// on main, scripts/lib/release-kind.mjs as of c166862): every published
+// package is one {name, version} entry. The older core/cli field pair is
+// still accepted so existing callers keep working. Lockstep, the five
+// action-only conditions, and the package-release default check are
+// unchanged for the current two-package layout.
 //
 // The property the old assertion bought has to survive admitting the
 // second shape: a mistyped or mis-pointed tag must never publish anything,
 // and must never describe an unpublished version in a Release. An
 // action-only tag is therefore not "any tag that is not an exact match" --
-// it is a tag that clears all four of the conditions below, each of which
+// it is a tag that clears all of the conditions below, each of which
 // closes off one way a typo could get through:
 //
 //   a. exact semver, no prerelease or build suffix, no leading zeros --
@@ -30,8 +31,8 @@
 //      ordering, so a tag onto an older line ("v0.9.0" while the packages
 //      are at 0.10.0, which string comparison reads as a forward move) is
 //      a mistake rather than a release;
-//   c. both packages ALREADY on the registry at exactly the package
-//      version, which is what makes "describes nothing unpublished"
+//   c. every published package ALREADY on the registry at exactly the
+//      package version, which is what makes "describes nothing unpublished"
 //      true rather than merely likely;
 //   d. action.yml's version default equal to the package version, because
 //      an action-only tag ships the scanner that is already published --
@@ -182,27 +183,53 @@ export function readActionVersionDefault(actionYmlText) {
  * such a version, and demanding one would make a prerelease package
  * release impossible rather than safe.
  */
-function assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescription }) {
-  if (parseExactSemver(coreVersion) === null) {
+function assertPackageReleaseDefault({ version, actionYmlText, refDescription }) {
+  if (parseExactSemver(version) === null) {
     return;
   }
 
   const actionDefault = readActionVersionDefault(actionYmlText);
-  if (actionDefault !== coreVersion) {
+  if (actionDefault !== version) {
     throw new Error(
-      `This is a package release of version ${coreVersion} (${refDescription}), but action.yml's version input defaults to ${actionDefault}. The tag this release creates would install scanner ${actionDefault} while publishing ${coreVersion} -- a different scanner than it publishes. Move the default with the packages. Refusing to publish.`
+      `This is a package release of version ${version} (${refDescription}), but action.yml's version input defaults to ${actionDefault}. The tag this release creates would install scanner ${actionDefault} while publishing ${version} -- a different scanner than it publishes. Move the default with the packages. Refusing to publish.`
     );
   }
+}
+
+/**
+ * Vault-guard's packages[] shape, with the older core/cli pair accepted so
+ * existing callers keep working. An explicit empty packages[] is empty,
+ * not a cue to fall back.
+ */
+function resolvePackages({ packages, coreName, coreVersion, cliName, cliVersion }) {
+  if (Array.isArray(packages)) {
+    return packages;
+  }
+  if (
+    coreName === undefined &&
+    coreVersion === undefined &&
+    cliName === undefined &&
+    cliVersion === undefined
+  ) {
+    return [];
+  }
+  return [
+    { name: coreName, version: coreVersion },
+    { name: cliName, version: cliVersion },
+  ];
 }
 
 /**
  * @param {object} input
  * @param {string|null} input.tagName        the pushed tag, or null on workflow_dispatch
  * @param {string} input.refDescription      how to name this ref in an error message
- * @param {string} input.coreName            the core package's npm name
- * @param {string} input.coreVersion         packages/core's version
- * @param {string} input.cliName             the cli package's npm name
- * @param {string} input.cliVersion          packages/cli's version
+ * @param {{name: string, version: string}[]} [input.packages]
+ *        every package this repository publishes to npm. Preferred shape,
+ *        matching vault-guard. Must be non-empty when provided.
+ * @param {string} [input.coreName]          older two-field form: core npm name
+ * @param {string} [input.coreVersion]       older two-field form: packages/core version
+ * @param {string} [input.cliName]           older two-field form: cli npm name
+ * @param {string} [input.cliVersion]        older two-field form: packages/cli version
  * @param {string} input.actionYmlText       the contents of action.yml at this commit
  * @param {string|null} input.changelogText  the contents of CHANGELOG.md at this
  *        commit, or null if it could not be read
@@ -215,6 +242,7 @@ function assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescriptio
 export function classifyRelease({
   tagName,
   refDescription,
+  packages: packagesInput,
   coreName,
   coreVersion,
   cliName,
@@ -223,14 +251,28 @@ export function classifyRelease({
   changelogText,
   publishedVersion,
 }) {
-  // Unchanged from the original assertion, and still first: the two
-  // packages are published in lockstep on purpose, and a cli release
-  // without a matching core bump is not a smaller mistake, it is a silent
-  // one. Checked before the tag is even looked at, so a lockstep break
-  // reports as a lockstep break rather than as a tag mismatch.
-  if (coreVersion !== cliVersion) {
+  const packages = resolvePackages({
+    packages: packagesInput,
+    coreName,
+    coreVersion,
+    cliName,
+    cliVersion,
+  });
+  if (!Array.isArray(packages) || packages.length === 0) {
+    throw new Error('classifyRelease requires at least one package (packages/*/package.json).');
+  }
+
+  // Unchanged in spirit from the two-package check this replaces, and
+  // still first: every published package moves in lockstep on purpose, and
+  // one of them drifting is not a smaller mistake, it is a silent one.
+  // Checked before the tag is even looked at, so a lockstep break reports
+  // as a lockstep break rather than as a tag mismatch.
+  const version = packages[0].version;
+  const mismatched = packages.filter((pkg) => pkg.version !== version);
+  if (mismatched.length > 0) {
+    const described = packages.map((pkg) => `${pkg.name}@${pkg.version}`).join(', ');
     throw new Error(
-      `Version lockstep broken: packages/core is at ${coreVersion}, packages/cli is at ${cliVersion}, ${refDescription}. core and cli must always carry the same version. Refusing to publish.`
+      `Version lockstep broken: ${described}, ${refDescription}. Every published package must always carry the same version. Refusing to publish.`
     );
   }
 
@@ -244,13 +286,13 @@ export function classifyRelease({
   // yet -- but both check action.yml's default, for the reason in
   // assertPackageReleaseDefault.
   if (tagName === null || tagName === undefined || tagName === '') {
-    assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescription, tagName: null });
-    return { actionOnly: false, scannerVersion: coreVersion };
+    assertPackageReleaseDefault({ version, actionYmlText, refDescription });
+    return { actionOnly: false, scannerVersion: version };
   }
 
-  if (tagName === `v${coreVersion}`) {
-    assertPackageReleaseDefault({ coreVersion, actionYmlText, refDescription, tagName });
-    return { actionOnly: false, scannerVersion: coreVersion };
+  if (tagName === `v${version}`) {
+    assertPackageReleaseDefault({ version, actionYmlText, refDescription });
+    return { actionOnly: false, scannerVersion: version };
   }
 
   // From here on this is an action-only CANDIDATE. It is not an
@@ -261,20 +303,20 @@ export function classifyRelease({
   const tagVersion = tagVersionText === null ? null : parseExactSemver(tagVersionText);
   if (tagVersion === null) {
     throw new Error(
-      `Tag ${tagName} does not match the package version ${coreVersion}, so it could only be an action-only release tag, but it is not "v" plus an exact semver version (no prerelease, no build suffix, no leading zeros -- the same shape action.yml accepts for its version input). Refusing to publish.`
+      `Tag ${tagName} does not match the package version ${version}, so it could only be an action-only release tag, but it is not "v" plus an exact semver version (no prerelease, no build suffix, no leading zeros -- the same shape action.yml accepts for its version input). Refusing to publish.`
     );
   }
 
-  const packageVersion = parseExactSemver(coreVersion);
+  const packageVersion = parseExactSemver(version);
   if (packageVersion === null) {
     throw new Error(
-      `Tag ${tagName} does not match the package version ${coreVersion}, and that package version is not exact semver, so the two cannot be ordered against each other. An action-only release requires an exact package version already on the registry. Refusing to publish.`
+      `Tag ${tagName} does not match the package version ${version}, and that package version is not exact semver, so the two cannot be ordered against each other. An action-only release requires an exact package version already on the registry. Refusing to publish.`
     );
   }
 
   if (compareExactSemver(tagVersion, packageVersion) <= 0) {
     throw new Error(
-      `Tag ${tagName} is not greater than the package version ${coreVersion} (${refDescription}). An action-only release moves the tag forward past the scanner version it ships; a tag at or below the package version is a mistyped or mis-pointed tag. Refusing to publish.`
+      `Tag ${tagName} is not greater than the package version ${version} (${refDescription}). An action-only release moves the tag forward past the scanner version it ships; a tag at or below the package version is a mistyped or mis-pointed tag. Refusing to publish.`
     );
   }
 
@@ -292,8 +334,20 @@ export function classifyRelease({
       `Tag ${tagName} looks like an action-only release, but CHANGELOG.md could not be read at the tagged commit, so its entry could not be checked. Refusing to publish.`
     );
   }
-  const headingPattern = new RegExp(`^##\\s*\\[${tagVersionText.replace(/\./g, '\\.')}\\]`, 'm');
-  if (!headingPattern.test(changelogText)) {
+  // A regex built from the tag-derived version string once lived here.
+  // The version is exact semver by the time it reaches this point (the
+  // parseExactSemver check above already refused anything else), so it
+  // was never exploitable, but CodeQL flags the pattern on sight
+  // (js/regex-injection, js/incomplete-sanitization) and a "just escape it
+  // properly" fix is still a regex built from untrusted input for the next
+  // person to get subtly wrong. Splitting into lines and matching a
+  // literal prefix needs no escaping at all. The trailing "]" is load
+  // bearing: "## [0.6.10]" must not match a heading search for "0.6.1",
+  // and closing the bracket into the literal is what stops the shorter
+  // version from being read as a prefix of the longer one.
+  const headingPrefix = `## [${tagVersionText}]`;
+  const hasHeading = changelogText.split('\n').some((line) => line.trim().startsWith(headingPrefix));
+  if (!hasHeading) {
     throw new Error(
       `Tag ${tagName} looks like an action-only release, but CHANGELOG.md at the tagged commit has no "## [${tagVersionText}]" heading. An action-only release is still a release: a tag with no entry is far more likely to be a version bump someone forgot to commit than a deliberate one. Refusing to publish.`
     );
@@ -302,24 +356,21 @@ export function classifyRelease({
   // The condition that actually carries the "never describes anything
   // unpublished" property. Everything above is shape, ordering and this
   // tree's own files; this is the one that talks to the world.
-  for (const [name, version] of [
-    [coreName, coreVersion],
-    [cliName, cliVersion],
-  ]) {
-    const found = publishedVersion(name, version);
-    if (found !== version) {
+  for (const pkg of packages) {
+    const found = publishedVersion(pkg.name, pkg.version);
+    if (found !== pkg.version) {
       throw new Error(
-        `Tag ${tagName} looks like an action-only release, but ${name}@${version} is not on the npm registry (lookup returned ${found === null || found === undefined ? 'nothing' : `"${found}"`}). An action-only tag must ship a scanner that is already published, or its GitHub Release would describe a version nobody can install. Refusing to publish.`
+        `Tag ${tagName} looks like an action-only release, but ${pkg.name}@${pkg.version} is not on the npm registry (lookup returned ${found === null || found === undefined ? 'nothing' : `"${found}"`}). An action-only tag must ship a scanner that is already published, or its GitHub Release would describe a version nobody can install. Refusing to publish.`
       );
     }
   }
 
   const actionDefault = readActionVersionDefault(actionYmlText);
-  if (actionDefault !== coreVersion) {
+  if (actionDefault !== version) {
     throw new Error(
-      `Tag ${tagName} looks like an action-only release, but action.yml's version input defaults to ${actionDefault} while the packages are at ${coreVersion}. An action-only tag ships the scanner that is already published; a moved default means the scanner changed, which is a package release whose packages were never bumped. Refusing to publish.`
+      `Tag ${tagName} looks like an action-only release, but action.yml's version input defaults to ${actionDefault} while the packages are at ${version}. An action-only tag ships the scanner that is already published; a moved default means the scanner changed, which is a package release whose packages were never bumped. Refusing to publish.`
     );
   }
 
-  return { actionOnly: true, scannerVersion: coreVersion };
+  return { actionOnly: true, scannerVersion: version };
 }

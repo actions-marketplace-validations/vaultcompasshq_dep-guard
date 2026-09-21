@@ -507,6 +507,61 @@ describe('classifyRelease', () => {
       classifyRelease(actionOnlyInputs({ tagName: 'v0.5.9', refDescription: 'tag v0.5.9' }))
     ).toThrow(/tag v0\.5\.9/);
   });
+
+  it('requires at least one package', () => {
+    expect(() =>
+      classifyRelease({
+        tagName: null,
+        refDescription: 'branch main (not a tag push)',
+        packages: [],
+        actionYmlText: actionYmlWith('0.6.0'),
+        changelogText: changelogWith('0.6.0'),
+        publishedVersion: registryStub([]),
+      })
+    ).toThrow(/at least one package/i);
+  });
+
+  it('accepts the vault-guard packages[] shape for the current two-package layout', () => {
+    const result = classifyRelease({
+      tagName: 'v0.6.1',
+      refDescription: 'tag v0.6.1',
+      packages: [
+        { name: CORE_NAME, version: '0.6.0' },
+        { name: CLI_NAME, version: '0.6.0' },
+      ],
+      actionYmlText: actionYmlWith('0.6.0'),
+      changelogText: changelogWith('0.6.1', '0.6.0'),
+      publishedVersion: registryStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]),
+    });
+    expect(result.actionOnly).toBe(true);
+    expect(result.scannerVersion).toBe('0.6.0');
+  });
+
+  it('accepts a single-package packages[] the same way it accepts two', () => {
+    const result = classifyRelease({
+      tagName: 'v0.6.1',
+      refDescription: 'tag v0.6.1',
+      packages: [{ name: CORE_NAME, version: '0.6.0' }],
+      actionYmlText: actionYmlWith('0.6.0'),
+      changelogText: changelogWith('0.6.1', '0.6.0'),
+      publishedVersion: registryStub([`${CORE_NAME}@0.6.0`]),
+    });
+    expect(result.actionOnly).toBe(true);
+    expect(result.scannerVersion).toBe('0.6.0');
+  });
+
+  it('does not treat a longer heading as a match for a shorter version', () => {
+    expect(() =>
+      classifyRelease(
+        actionOnlyInputs({
+          changelogText: changelogWith('0.6.10', '0.6.0'),
+        })
+      )
+    ).toThrow(/CHANGELOG\.md/);
+    expect(
+      classifyRelease(actionOnlyInputs({ changelogText: changelogWith('0.6.1', '0.6.0') })).actionOnly,
+    ).toBe(true);
+  });
 });
 
 // The workflow half. The library above can be perfectly correct while
@@ -714,6 +769,32 @@ describe('.github/workflows/release.yml wiring', () => {
     expect(changelogArgs).toHaveLength(2);
   });
 
+  it('passes both published packages to the decision script', () => {
+    for (const dir of ['core', 'cli']) {
+      expect(workflow).toContain(`require('./packages/${dir}/package.json').name`);
+      expect(workflow).toContain(`require('./packages/${dir}/package.json').version`);
+    }
+    const packageFlags = workflow.match(/--package "/g) ?? [];
+    // Two packages, two invocations (tag push and workflow_dispatch).
+    expect(packageFlags).toHaveLength(4);
+  });
+
+  it('keeps the decision step and the "Publish to npm" loop in the same set of packages', () => {
+    const decisionDirs = [...workflow.matchAll(/require\('\.\/packages\/([a-z0-9_-]+)\/package\.json'\)\.name/g)].map(
+      (match) => match[1]
+    );
+    expect(decisionDirs.length).toBeGreaterThan(0);
+
+    const forDirMatch = workflow.match(/for dir in ([^;]+); do/);
+    expect(forDirMatch).not.toBeNull();
+    const publishDirs = forDirMatch[1]
+      .trim()
+      .split(/\s+/)
+      .map((dir) => dir.replace(/^packages\//, ''));
+
+    expect(new Set(publishDirs)).toEqual(new Set(decisionDirs));
+  });
+
   it('calls the decision script from a step with the id the conditions read', () => {
     expect(workflow).toMatch(/^ {4}- name: Decide the release kind[^\n]*\n {6}id: kind$/m);
     expect(workflow).toContain('node scripts/classify-release-tag.mjs');
@@ -901,6 +982,31 @@ describe('classify-release-tag.mjs', () => {
     const result = run(['--tag', 'v0.6.1'], {});
     expect(result.status).toBe(1);
     expect(result.stdout + result.stderr).toMatch(/--core-name/);
+  });
+
+  it('accepts --package name=version the same way vault-guard does', () => {
+    const stub = makeNpmStub([`${CORE_NAME}@0.6.0`, `${CLI_NAME}@0.6.0`]);
+    const result = run(
+      [
+        '--tag',
+        'v0.6.1',
+        '--package',
+        `${CORE_NAME}=0.6.0`,
+        '--package',
+        `${CLI_NAME}=0.6.0`,
+        ...files(),
+      ],
+      { DG_NPM_BIN: stub.bin }
+    );
+    expect(result.status).toBe(0);
+    expect(result.outputs).toContain('action_only=true');
+    expect(result.outputs).toContain('scanner_version=0.6.0');
+  });
+
+  it('exits 1 when a --package value is not name=version', () => {
+    const result = run(['--tag', 'v0.6.1', '--package', 'not-a-valid-value'], {});
+    expect(result.status).toBe(1);
+    expect(result.stdout + result.stderr).toMatch(/name=version/);
   });
 
   it('treats an npm lookup that fails for any reason as not published', () => {
