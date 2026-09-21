@@ -10,6 +10,8 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-09-20
+
 - The Validate inputs step now declares GITHUB_BASE_REF from the event
   payload in its env mapping, so the pull-request test cannot come from the
   workflow file even if the platform no-overwrite guarantee failed.
