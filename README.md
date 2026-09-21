@@ -258,7 +258,7 @@ steps:
       # and the baseline from the base branch, which a shallow checkout
       # does not have.
       fetch-depth: 0
-  - uses: vaultcompasshq/dep-guard@v0.7.0
+  - uses: vaultcompasshq/dep-guard@v0.7.1
     with:
       path: .
       online: 'true'
