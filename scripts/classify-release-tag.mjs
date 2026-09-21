@@ -13,8 +13,8 @@
 // Usage:
 //   node scripts/classify-release-tag.mjs \
 //     [--tag v0.6.1] \
-//     --core-name @vaultcompass/dep-guard-core --core-version 0.6.0 \
-//     --cli-name @vaultcompass/dep-guard --cli-version 0.6.0 \
+//     --package @vaultcompass/dep-guard-core=0.6.0 \
+//     --package @vaultcompass/dep-guard=0.6.0 \
 //     [--action-yml action.yml] [--changelog CHANGELOG.md]
 //
 // Omit --tag for a workflow_dispatch run, which has no tag: the lockstep
@@ -40,36 +40,42 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const REGISTRY = 'https://registry.npmjs.org';
 
-const FLAGS = [
-  '--tag',
-  '--core-name',
-  '--core-version',
-  '--cli-name',
-  '--cli-version',
-  '--action-yml',
-  '--changelog',
-];
-const REQUIRED = ['--core-name', '--core-version', '--cli-name', '--cli-version'];
+const SINGLE_FLAGS = ['--tag', '--action-yml', '--changelog'];
 
 function parseArgs(argv) {
-  const values = new Map();
+  const single = new Map();
+  const packages = [];
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
-    if (!FLAGS.includes(flag)) {
-      throw new Error(`unrecognised argument "${flag}". Expected one of ${FLAGS.join(', ')}.`);
+    if (flag === '--package') {
+      const value = argv[i + 1];
+      if (value === undefined) {
+        throw new Error('--package needs a value.');
+      }
+      const eq = value.indexOf('=');
+      if (eq <= 0 || eq === value.length - 1) {
+        throw new Error(`--package value "${value}" must be name=version.`);
+      }
+      packages.push({ name: value.slice(0, eq), version: value.slice(eq + 1) });
+      i += 1;
+      continue;
+    }
+    if (!SINGLE_FLAGS.includes(flag)) {
+      throw new Error(
+        `unrecognised argument "${flag}". Expected one of ${[...SINGLE_FLAGS, '--package'].join(', ')}.`
+      );
     }
     const value = argv[i + 1];
     if (value === undefined) {
       throw new Error(`${flag} needs a value.`);
     }
-    values.set(flag, value);
+    single.set(flag, value);
     i += 1;
   }
-  const missing = REQUIRED.filter((flag) => !values.has(flag));
-  if (missing.length > 0) {
-    throw new Error(`missing required argument(s): ${missing.join(', ')}.`);
+  if (packages.length === 0) {
+    throw new Error('at least one --package name=version is required.');
   }
-  return values;
+  return { single, packages };
 }
 
 // Returns the version the registry reports for name@version, or null. Any
@@ -114,8 +120,8 @@ function main() {
     return;
   }
 
-  const tagName = args.get('--tag') ?? null;
-  const actionYmlPath = path.resolve(args.get('--action-yml') ?? path.join(ROOT, 'action.yml'));
+  const tagName = args.single.get('--tag') ?? null;
+  const actionYmlPath = path.resolve(args.single.get('--action-yml') ?? path.join(ROOT, 'action.yml'));
 
   // An unreadable action.yml is fatal on BOTH paths, not only the
   // action-only one: the repository root's action is one of the two things
@@ -136,7 +142,7 @@ function main() {
   // here. The library turns that null into a refusal on the path that
   // needs it, and a package release is not blocked by a file it never
   // asks about.
-  const changelogPath = path.resolve(args.get('--changelog') ?? path.join(ROOT, 'CHANGELOG.md'));
+  const changelogPath = path.resolve(args.single.get('--changelog') ?? path.join(ROOT, 'CHANGELOG.md'));
   let changelogText = null;
   try {
     changelogText = readFileSync(changelogPath, 'utf8');
@@ -151,10 +157,7 @@ function main() {
     decision = classifyRelease({
       tagName,
       refDescription,
-      coreName: args.get('--core-name'),
-      coreVersion: args.get('--core-version'),
-      cliName: args.get('--cli-name'),
-      cliVersion: args.get('--cli-version'),
+      packages: args.packages,
       actionYmlText,
       changelogText,
       publishedVersion: makeNpmLookup(process.env.DG_NPM_BIN ?? 'npm'),

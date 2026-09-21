@@ -193,10 +193,8 @@ jobs:
         if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
           node scripts/classify-release-tag.mjs \
             --tag "${GITHUB_REF_NAME}" \
-            --core-name "${CORE_NAME}" \
-            --core-version "${CORE_VERSION}" \
-            --cli-name "${CLI_NAME}" \
-            --cli-version "${CLI_VERSION}" \
+            --package "${CORE_NAME}=${CORE_VERSION}" \
+            --package "${CLI_NAME}=${CLI_VERSION}" \
             --action-yml action.yml \
             --changelog CHANGELOG.md
 
@@ -220,10 +218,8 @@ jobs:
           fi
         else
           node scripts/classify-release-tag.mjs \
-            --core-name "${CORE_NAME}" \
-            --core-version "${CORE_VERSION}" \
-            --cli-name "${CLI_NAME}" \
-            --cli-version "${CLI_VERSION}" \
+            --package "${CORE_NAME}=${CORE_VERSION}" \
+            --package "${CLI_NAME}=${CLI_VERSION}" \
             --action-yml action.yml \
             --changelog CHANGELOG.md
         fi
