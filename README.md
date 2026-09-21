@@ -19,6 +19,10 @@ optional umbrella that runs them from one policy file, one hook and one
 report.
 <!-- /guardrails-family -->
 
+```bash
+npm install -g @vaultcompass/dep-guard
+```
+
 **Status: published.** [`@vaultcompass/dep-guard`](https://www.npmjs.com/package/@vaultcompass/dep-guard)
 is on npm, covered by 1234 tests, and works out of the box: the package
 name corpus ships inside
@@ -676,6 +680,8 @@ pnpm typecheck
 `docs/INVARIANTS.md` records the rules the engine depends on across module
 boundaries. Read it before changing the delta, the fingerprint, path
 handling, or anything that decides an exit code.
+
+Adopter feedback is a row in [FINDINGS.md](FINDINGS.md). How to change this repository is in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
