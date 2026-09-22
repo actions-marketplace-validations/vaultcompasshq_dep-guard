@@ -10,6 +10,13 @@ GitHub release notes, which are generated from the commit history.
 
 ## [Unreleased]
 
+- Pinned the Action's npm floor (10.5.2), version-shape regex and its
+  occurrence count, `--ignore-scripts` install line, and the exact
+  `npm audit signatures` subshell in a drift check. The hygiene blocklist
+  comment now names all four family repositories. The one-command install
+  is on the first screen of the README, and adopter feedback is linked
+  from there next to CONTRIBUTING.
+
 - The release-kind classifier now takes a packages[] list, the same shape
   vault-guard 1.8.0 uses on main (scripts/lib/release-kind.mjs as of
   c166862). The CHANGELOG heading check is a literal "## [X.Y.Z]" prefix

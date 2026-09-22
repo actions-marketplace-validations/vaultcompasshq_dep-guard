@@ -21,14 +21,14 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // The hashes travel between repositories without any of them ever writing
 // down the plaintext they stand for.
 //
-// This is the UNION across the family (dep-guard, vault-guard, conductor),
-// reconciled 2026-08-18. Before that the three lists had silently diverged:
-// dep-guard and vault-guard shared eleven hashes, conductor had a different
-// eleven, and the symmetric difference was four codenames -- each of them
-// guarded in one public repository and unguarded in another, which is the
-// same as unguarded. A blocklist that differs per repository protects the
-// intersection and advertises the difference, so all three carry the union
-// and a new entry is added to all three in the same change.
+// This is the UNION across the family (dep-guard, vault-guard, intent-guard,
+// conductor), reconciled 2026-08-18. Before that the three lists had silently
+// diverged: dep-guard and vault-guard shared eleven hashes, conductor had a
+// different eleven, and the symmetric difference was four codenames -- each
+// of them guarded in one public repository and unguarded in another, which is
+// the same as unguarded. A blocklist that differs per repository protects the
+// intersection and advertises the difference, so all four carry the union
+// and a new entry is added to every repository in the same change.
 const BANNED_HASHES = new Set([
   'bcbff8a223bdb66059e43ae951a28ed12598c9e782fb65c58dabcd347f65cabe',
   'ec4e8dbcdbe500197bb27e769cee7864c0a4b4876a604998a23c80bbcc979d4c',
