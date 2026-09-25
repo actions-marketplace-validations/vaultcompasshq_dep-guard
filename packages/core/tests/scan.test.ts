@@ -602,6 +602,115 @@ describe('scan', () => {
       expect((caught as DepGuardError).code).toBe('path-missing');
     });
   });
+
+  // Ported from a sibling scanner's whole-tree "examined zero files is
+  // could-not-run" invariant, adapted to dep-guard's unit of work: a
+  // manifest, not a file. "Examined zero" here means loadStates resolved
+  // zero manifests on the side under judgment (statePair.after), which is
+  // ambiguous on its own -- it is both what a genuinely dependency-free
+  // repository looks like (a real, common, and legitimate state that must
+  // stay a clean pass) and what a misrooted scan looks like (the resolver
+  // never reached a manifest that is really there). The two are told apart
+  // by a cheap on-disk existence probe that is deliberately NOT the
+  // resolver: present-but-zero is could-not-run, absent-and-zero stays
+  // clean.
+  describe('a resolve that finds zero manifests', () => {
+    test('a manifest present on disk but never resolved (workspace glob missed it) is could-not-run', async () => {
+      // No root package.json and no workspaces declaration anywhere, so
+      // packages/app is never discovered as a workspace member -- the
+      // resolver sees nothing, even though a real manifest sits on disk
+      // two directories down. This is the dep-guard analogue of a
+      // misrooted whole-tree walk: the scan root technically resolved, but
+      // what it actually looked at was not the project.
+      await write('packages/app/package.json', manifestJson({ react: '18.0.0' }));
+
+      let caught: unknown;
+      try {
+        await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(DepGuardError);
+      expect((caught as DepGuardError).code).toBe('manifests-unresolved');
+      expect((caught as DepGuardError).message).toMatch(/scan root may be wrong/);
+      expect((caught as DepGuardError).message).toMatch(/repository root/);
+    });
+
+    test('a genuinely dependency-free repository (nothing on disk either) stays a clean pass', async () => {
+      // Nothing written at all: no package.json anywhere under the root,
+      // so the existence probe agrees with the resolver that there is
+      // genuinely nothing here. Must NOT be could-not-run -- a repository
+      // with no dependencies is a legitimate, common state.
+      const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.exitCode).toBe(0);
+    });
+
+    test('a lockfile present on disk with no package.json anywhere is also could-not-run', async () => {
+      // A lockfile is a manifest-shaped file this resolver recognizes too
+      // (LOCKFILE_FILE_NAMES); the probe has to look for it, not only for
+      // package.json, or a repo whose package.json went missing but whose
+      // lockfile survived would misreport as dependency-free.
+      await write(
+        'package-lock.json',
+        JSON.stringify({ name: 'root', version: '1.0.0', lockfileVersion: 3, requires: true, packages: {} })
+      );
+
+      let caught: unknown;
+      try {
+        await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(DepGuardError);
+      expect((caught as DepGuardError).code).toBe('manifests-unresolved');
+    });
+
+    test('a normal repo with resolved manifests and no risky deps still exits 0 (probe never runs)', async () => {
+      await write('package.json', manifestJson({ react: '18.0.0' }));
+      await commitAll('first');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'audit' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.exitCode).toBe(0);
+    });
+
+    test('an empty staged delta (nothing changed) with manifests present stays clean, not could-not-run', async () => {
+      // The imposed-vs-discovered split this feature must not blur: a
+      // staged scan with a resolved, non-empty manifest set but no NEW
+      // dependency is an empty PR DELTA, which is a completely different
+      // thing from zero manifests resolved. This must keep passing exactly
+      // as it did before this feature existed.
+      await write('package.json', manifestJson({ react: '18.0.0' }));
+      await commitAll('first');
+      await write('package.json', manifestJson({ react: '18.0.0' }));
+      await git('add', '-A');
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.exitCode).toBe(0);
+    });
+
+    test('a staged scan with an untracked manifest on disk (not git added) stays a clean pass, not could-not-run', async () => {
+      // Staged mode's scope is the git index, not the filesystem -- a
+      // package.json that was created but never `git add`-ed is a
+      // legitimate, imposed-empty staged scope (the developer has not
+      // staged it yet), not a misrooted or glob-missed scan. Running
+      // probeManifestOnDisk here compares the index against the working
+      // tree, which will always disagree the moment an untracked manifest
+      // exists, so this check must not run in staged mode at all. The
+      // sibling scanner makes the same exclusion for the same reason.
+      await write('package.json', manifestJson({ react: '18.0.0' }));
+
+      const result = await scan({ repoRoot: repo, mode: { kind: 'staged' }, corpusDir: FIXTURE_CORPUS });
+
+      expect(result.findings).toHaveLength(0);
+      expect(result.exitCode).toBe(0);
+    });
+  });
 });
 
 describe('checkSingle', () => {

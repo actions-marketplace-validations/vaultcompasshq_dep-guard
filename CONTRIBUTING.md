@@ -70,3 +70,10 @@ pnpm lint
 `pnpm lint` runs the public-repo hygiene guard above; it fails on the first
 blocked token, internal path, or non-ASCII dash it finds, naming the file
 and line.
+
+## Findings log
+
+[FINDINGS.md](./FINDINGS.md) is a durable, append-by-PR record of what
+dep-guard actually did when run against real dependency changes, including
+runs that caught nothing. Open a PR to append a row after you run it
+against real code, your own or someone else's.

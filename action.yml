@@ -8,19 +8,47 @@ branding:
 inputs:
   version:
     description: |
-      npm dist-tag or semver for @vaultcompass/dep-guard. Validated against
-      `^(latest|next|beta|[0-9A-Za-z.+-]{1,64})$` so an attacker-controlled
-      workflow input cannot inject an npm tag or a shell fragment.
+      The exact version of `@vaultcompass/dep-guard` to install, such as
+      `0.7.0`. Validated against `^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`,
+      and the default is the SCANNER version this action tag shipped with,
+      which is not always the same number as the tag: an action-only release
+      moves the tag and leaves the scanner where it is.
+
+      No leading zeros, which is what that pattern buys over three plain
+      `[0-9]+` groups. `01.2.3` and `0.6.00` are not semver, so npm does not
+      read them as versions at all and falls back to treating the spec as a
+      dist-tag, which is the family this input exists to refuse.
+
+      THIS USED TO DEFAULT TO `latest`, AND USED TO ACCEPT DIST-TAGS. Both are
+      refused now, for two different reasons.
+
+      A dist-tag means the program judging a pull request is whichever one the
+      registry served that morning, rather than one decided in the workflow
+      file and reviewable there.
+
+      The sharper reason is that the old charset was not a version check at
+      all. npm's specifier parser reads `@scope/name@<value>` as a PATH, not a
+      version, when the value begins with a dot or ends in `.tgz`: `.`, `..`
+      and `payload.tgz` all resolve against a directory instead of the
+      registry. Combined with a step that ran from inside the checkout, that
+      was one committed file away from the tree under judgment handing over its
+      own scanner.
+
+      A prerelease cannot be pinned either. The pattern that admits `-rc.1`
+      admits most of what a dist-tag would, and the version deciding a pull
+      request is not the place to widen a pattern for the convenience of
+      testing one.
     required: false
-    default: latest
+    default: 0.7.0
   path:
     description: |
       Path to scan, relative to the workspace root. Must be 1..256 characters
-      of `[A-Za-z0-9._/-]` and must not contain `..`, so it cannot escape
-      GITHUB_WORKSPACE. (The charset is checked with `+` plus a separate
-      length guard, never `{1,256}`: BSD regex sets RE_DUP_MAX to 255, so
-      `{1,256}` fails to compile on macOS and rejects every path including
-      `.`.)
+      of `[A-Za-z0-9._/-]`, must not contain `..`, and must not begin with `-`,
+      so it can neither escape GITHUB_WORKSPACE nor be read as an option by a
+      command it reaches. A `./` prefix is fine. (The charset is checked with
+      `+` plus a separate length guard, never `{1,256}`: BSD regex sets
+      RE_DUP_MAX to 255, so `{1,256}` fails to compile on macOS and rejects
+      every path including `.`.)
     required: false
     default: .
   online:
@@ -73,7 +101,17 @@ inputs:
   sarif-output:
     description: |
       Where to write the SARIF file, relative to the workspace root. Same
-      path rules as `path`.
+      path rules as `path`, and two more that exist because this input names
+      a file the action WRITES rather than one it reads.
+
+      It may not resolve under `.github/`, which holds the workflow file and
+      the CODEOWNERS entry that decide how this gate runs and who may change
+      them. Compared after normalising `./` segments and case, so `./.github/x`
+      and `.GitHub/x` are refused too.
+
+      It may not resolve through a symlink, at the file or at any directory on
+      the way to it. The head controls those, and a symlink there would send
+      the write outside the workspace.
     required: false
     default: dep-guard-results.sarif
   upload-sarif:
@@ -119,13 +157,154 @@ runs:
         DG_SARIF_OUTPUT: ${{ inputs.sarif-output }}
         DG_UPLOAD: ${{ inputs.upload-sarif }}
         DG_TRUST_BASE: ${{ inputs.trust-base }}
+        # Declared from the event payload so the value can't come from the
+        # workflow file even if the platform guarantee failed.
+        GITHUB_BASE_REF: ${{ github.base_ref }}
       run: |
         set -euo pipefail
 
-        if [[ ! "${DG_VERSION}" =~ ^(latest|next|beta|[0-9A-Za-z.+-]{1,64})$ ]]; then
-          printf '::error::dep-guard: invalid `version` input: %q\n' "${DG_VERSION}"
-          printf '::error::Allowed: latest | next | beta | semver-like (1..64 chars of [0-9A-Za-z.+-])\n'
+        # EXACT VERSIONS ONLY. Not a range, not a dist-tag, not `latest`, and
+        # the two things that refusal buys are different.
+        #
+        # A tag hands the choice of program to the registry on the morning of
+        # the run, so the version that scans a pull request stops being a
+        # decision written down in the workflow file.
+        #
+        # The other one is sharper. npm's specifier parser reads
+        # `@scope/name@<value>` as a PATH, not a version, when the value begins
+        # with a dot or ends in `.tgz`: `.`, `..` and `payload.tgz` all resolve
+        # against a directory rather than the registry. A charset that let
+        # those through would be one committed file away from the tree under
+        # judgment choosing its own scanner.
+        # No leading zeros in any of the three numbers. `01.2.3` and `0.6.00`
+        # are not semver, so npm does not read them as versions at all: a spec
+        # it cannot parse as a version falls back to being treated as a
+        # DIST-TAG, which is the exact family this check exists to refuse. A
+        # regexp of `[0-9]+` three times let them through.
+        if [[ ! "${DG_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+          printf '::error::dep-guard: the `version` input must be an exact version like 0.6.0, and was %q\n' "${DG_VERSION}"
+          printf '::error::A dist-tag such as latest, a range, a version with a leading zero such as 01.2.3, or anything else is refused. A value beginning with a dot or ending in .tgz is read by npm as a path rather than a version.\n'
+          printf '::error::If your workflow says `version: latest`, REMOVE the input: the default is the version this action tag shipped with, which is the pin you want.\n'
           exit 1
+        fi
+
+        # A FLOOR ON ONE EVENT ONLY: on a pull request, `version` may not name
+        # a scanner OLDER than the one this action tag ships with.
+        #
+        # THE HOLE. On a same-repo `pull_request` event GitHub runs the workflow
+        # file from the HEAD, so the `version:` input is written by the pull
+        # request being judged. The shape check above proves the input names a
+        # version and says nothing about WHICH one: every published version
+        # clears it, and ten are published, 0.1.0 through 0.7.0.
+        #
+        # WHAT ALREADY STOPS A BACKWARD PIN TODAY is not the shape check but a
+        # FLAG. `--trust-base` arrived in the 0.6.0 scanner, the run step
+        # appends it on every pull-request run and offers no opt-out, and a
+        # scanner at or below 0.5.0 answers `error: unknown option
+        # '--trust-base'`. So a pull request pinning 0.5.0 today already fails
+        # the job -- at the scan, several steps later, with a message about an
+        # unknown option rather than about what the pin was doing. This rule
+        # moves that failure up to the validate step and names the cause. It is
+        # a de facto flag-compatibility floor at 0.6.0, and the rule makes it
+        # explicit instead of leaving it to be discovered.
+        #
+        # The day a 0.8.0 scanner ships with new rules, a pull request pins
+        # 0.7.0, which knows `--trust-base` and runs cleanly, and is judged by
+        # the older rule set it chose for itself.
+        #
+        # This is the same class of hole as `trust-base: off`, refused by name a
+        # few checks below for exactly this reason. The difference is what a
+        # reviewer sees: deleting a security step reads as deleting a security
+        # step, while `version: 0.7.0` reads as ordinary version management.
+        #
+        # FORWARD STAYS ALLOWED, ON AN ASSUMPTION THIS RULE DOES NOT ENFORCE.
+        # The rule assumes a newer scanner is at least as strict as the one this
+        # tag ships. Nothing here checks that, and forward pins are not bounded:
+        # any higher version is accepted, including one that does not exist yet
+        # and one whose rules turn out to be weaker. The `version` input exists
+        # so a consumer can pin one. Only the backward direction, on the one
+        # event where the workflow file is written by the side under judgment,
+        # is refused.
+        #
+        # A CONSTANT OF ITS OWN, not the npm floor in the install step and not
+        # anything derived from an input. The npm floor is a property of the
+        # npm CLIENT and has nothing to say about the scanner.
+        # DG_TAG_SCANNER is THE TESTED SCANNER THIS TAG SHIPS, which moves with
+        # the published packages, and it is the `version` input's default. It is
+        # compared against as a hardcoded constant because `inputs.version` looks
+        # identical whether the consumer wrote 0.7.0 or the default supplied it,
+        # so the step cannot tell a pin from a default and the constant is the
+        # only source of truth. It is safe to trust because action.yml comes
+        # from the ref the consumer's workflow names, not from the pull
+        # request's tree.
+        #
+        # THAT HOLDS WHEN THE CONSUMER NAMES THIS ACTION BY OWNER AND REF, as
+        # `vaultcompasshq/dep-guard@TAG`. A LOCAL-PATH reference instead, the
+        # `./some/dir` form, reads action.yml out of the pull request's OWN
+        # tree, so the constant below is author-controlled and this rule
+        # protects nothing there. Self-testing workflows inside this repository
+        # are the usual reason to reference it that way.
+        #
+        # (Spelled without the `uses` KEY on purpose: a text guard in
+        # scripts/tests/action-path-validation.test.mjs requires every one of
+        # those in this file to end in a 40-character sha, and it cannot tell
+        # prose from a step.)
+        DG_TAG_SCANNER_MAJOR=0
+        DG_TAG_SCANNER_MINOR=7
+        DG_TAG_SCANNER_PATCH=0
+        DG_TAG_SCANNER="${DG_TAG_SCANNER_MAJOR}.${DG_TAG_SCANNER_MINOR}.${DG_TAG_SCANNER_PATCH}"
+
+        # GITHUB_BASE_REF being non-empty IS the pull-request test, and it is the
+        # same one the run step uses to decide whether to pass `--trust-base`
+        # under `auto`. A second detector for the same event is a second thing to
+        # keep in step.
+        if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+          # Matched again rather than read out of `BASH_REMATCH` from the shape
+          # check above. That array does survive the `!` there, but a reader
+          # repairing the shape check has no way to know this block is
+          # downstream of it, and a silently emptied capture would compare
+          # against zeroes and let everything through. The pattern is the same
+          # one deliberately, so the two cannot drift into disagreeing about
+          # what a version is.
+          if [[ ! "${DG_VERSION}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf '::error::dep-guard: internal: %q passed the version shape check and then did not parse. Refusing rather than guessing.\n' "${DG_VERSION}"
+            exit 1
+          fi
+          DG_MAJOR="${BASH_REMATCH[1]}"
+          DG_MINOR="${BASH_REMATCH[2]}"
+          DG_PATCH="${BASH_REMATCH[3]}"
+
+          # WRITTEN AS "ACCEPT ONLY IF PROVABLY NEW ENOUGH", NOT "REFUSE IF OLD".
+          #
+          # `[` returns 2 on a malformed comparison, and an `if` reads 2 as
+          # false, so a refuse-if shape turns an arithmetic error into
+          # permission -- on the one check whose whole job is to refuse. Here an
+          # error leaves the flag at 0 and the step refuses, so the failure
+          # direction is closed by construction rather than by getting every
+          # expression right. It is the same shape the npm floor in the install
+          # step uses, and for the same reason: the first two versions of that
+          # guard failed open by being written the other way round.
+          #
+          # Component by component, never as text: `0.10.0` sorts BELOW `0.7.0`
+          # as a string and above it as a version, and a lexicographic check
+          # would refuse the forward pin this rule deliberately leaves open.
+          DG_PR_SCANNER_OK=0
+          if [ "${DG_MAJOR}" -gt "${DG_TAG_SCANNER_MAJOR}" ] 2>/dev/null; then
+            DG_PR_SCANNER_OK=1
+          elif [ "${DG_MAJOR}" -eq "${DG_TAG_SCANNER_MAJOR}" ] 2>/dev/null; then
+            if [ "${DG_MINOR}" -gt "${DG_TAG_SCANNER_MINOR}" ] 2>/dev/null; then
+              DG_PR_SCANNER_OK=1
+            elif [ "${DG_MINOR}" -eq "${DG_TAG_SCANNER_MINOR}" ] 2>/dev/null && [ "${DG_PATCH}" -ge "${DG_TAG_SCANNER_PATCH}" ] 2>/dev/null; then
+              DG_PR_SCANNER_OK=1
+            fi
+          fi
+
+          if [ "${DG_PR_SCANNER_OK}" -ne 1 ]; then
+            printf '::error::dep-guard: on a pull request the `version` input may not ask for a scanner older than the one this action tag ships. It asks for %s, and this tag ships %s.\n' "${DG_VERSION}" "${DG_TAG_SCANNER}"
+            printf '::error::On a same-repo pull_request event GitHub runs the workflow file from the pull request head, so on this event the workflow file belongs to the pull request. An older scanner here would let a change choose the rules it is judged by.\n'
+            printf '::error::REMOVE the `version` input and this cannot happen: the default is the scanner this action tag ships. Pinning FORWARD is still accepted on a pull request: this rule assumes a newer scanner is at least as strict, and it does not bound how far forward you pin.\n'
+            exit 1
+          fi
         fi
 
         case "${DG_ONLINE}" in
@@ -159,8 +338,8 @@ runs:
             ;;
         esac
 
-        # path / sarif-output: relative, inside the workspace. No `..`
-        # segments, no leading `/`.
+        # path / sarif-output / trust-base: relative, inside the workspace. No
+        # `..` segments, no leading `/`, no leading `-`.
         #
         # The charset check uses `+` and a separate length guard, NOT
         # `{1,256}`: macOS bash uses a BSD regex engine with RE_DUP_MAX 255,
@@ -183,10 +362,61 @@ runs:
             printf '::error::dep-guard: `%s` must be relative to the workspace: %q\n' "${name}" "${value}"
             exit 1
           fi
+          # The leading-dash rule is not about escaping the workspace, and it
+          # applies to every value rather than only to the ref: a path or a ref
+          # beginning with `-` is read as an OPTION by whichever command
+          # dep-guard hands it to. Caught here, where the message can name the
+          # workflow input that produced it, which git cannot.
+          if [[ "${value}" == -* ]]; then
+            printf '::error::dep-guard: `%s` must not begin with a dash: %q\n' "${name}" "${value}"
+            exit 1
+          fi
         }
 
         validate_path "path" "${DG_PATH}"
         validate_path "sarif-output" "${DG_SARIF_OUTPUT}"
+
+        # NORMALISE FOR COMPARISON, do not refuse the spelling.
+        #
+        # A `.` path segment is a second name for the same file, so a guard
+        # that compares strings can be walked past with `./`. The first attempt
+        # at this refused any value containing `./` outright, which was wrong
+        # in a way that would have broken working repositories: `path: ./src`
+        # is ordinary Actions style, it was accepted by every earlier release,
+        # and a security upgrade that turns a green check red is an upgrade
+        # people back out of. Normalising costs the same and breaks nobody.
+        #
+        # Lowercased as well, because a macOS runner's filesystem is
+        # case-insensitive by default: `.GitHub/x` and `.github/x` are the same
+        # directory there, and a case-sensitive comparison sees two strings.
+        # Same reasoning as the `[Oo][Ff][Ff]` match further down.
+        # To a FIXED POINT, because the rewrites feed each other and applying
+        # them once each in a fixed order leaves holes. Stripping a leading
+        # `./` from `.//.github/x` yields `/.github/x`, which then matches
+        # neither `.github` nor `.github/*` and sailed past this guard: the
+        # test for it was written first and caught the ordering bug.
+        normalise_path() {
+          local value="$1"
+          local previous=""
+          while [[ "${value}" != "${previous}" ]]; do
+            previous="${value}"
+            value="${value//\/\//\/}"
+            value="${value//\/.\//\/}"
+            value="${value#./}"
+          done
+          printf '%s' "${value,,}"
+        }
+
+        # `.github/` holds the workflow file and the CODEOWNERS entry that
+        # decide how this gate runs and who may change it. A SARIF written
+        # there is one upload, commit or artifact step away from landing inside
+        # the path a reviewer is protecting.
+        DG_SARIF_NORMALISED="$(normalise_path "${DG_SARIF_OUTPUT}")"
+        if [[ "${DG_SARIF_NORMALISED}" == ".github" || "${DG_SARIF_NORMALISED}" == ".github/"* ]]; then
+          printf '::error::dep-guard: `sarif-output` must not write under .github/: %q\n' "${DG_SARIF_OUTPUT}"
+          printf '::error::That directory holds the workflow file and the CODEOWNERS entry that decide how this gate runs. Write the SARIF somewhere else.\n'
+          exit 1
+        fi
 
         # There is no opt-out value, and `off` is refused BY NAME rather
         # than left to fail the charset check with a confusing message.
@@ -201,35 +431,223 @@ runs:
         # setting the untrusted side controls. Base-ref judging is the
         # floor, not a knob. Refusing loudly, with the alternative in the
         # message, is what keeps someone from quietly re-adding it.
-        if [[ "${DG_TRUST_BASE}" == "off" ]]; then
-          printf '::error::dep-guard: `trust-base: off` is not supported. Pull-request mode is not optional: on a same-repository pull_request event the workflow file runs from the pull request head, so an opt-out input would be settable by the pull request it governs.\n'
-          printf '::error::To keep pre-0.6.0 behaviour while you add `fetch-depth: 0` to actions/checkout, pin this action to @v0.5.0.\n'
-          exit 1
-        fi
+        # Matched in any capitalisation, because a value refused as `off` and
+        # accepted as `Off` would be an opt-out with a shift key in front of
+        # it: git would then be asked for a ref named Off, fail to resolve it,
+        # and the run would exit 2 for a reason nobody could read.
+        case "${DG_TRUST_BASE}" in
+          [Oo][Ff][Ff])
+            printf '::error::dep-guard: `trust-base: off` is not supported. Pull-request mode is not optional: on a same-repository pull_request event the workflow file runs from the pull request head, so an opt-out input would be settable by the pull request it governs.\n'
+            printf '::error::To keep pre-0.6.0 behaviour while you add `fetch-depth: 0` to actions/checkout, pin this action to @v0.5.0.\n'
+            exit 1
+            ;;
+        esac
 
         # trust-base is a git ref, not a path, but the same charset serves:
         # a ref is letters, digits, dots, dashes, underscores and slashes.
         # Empty means "decide from the event", so it is not validated as a
-        # ref.
-        #
-        # The leading-dash check is the one that is not about paths. A ref
-        # beginning with `-` would be read as an OPTION by whichever git
-        # command dep-guard hands it to, which is why core screens it too;
-        # this catches it a layer earlier, where the message can name the
-        # workflow input that produced it.
+        # ref. The leading-dash rule it used to carry on its own now lives in
+        # validate_path, which applies it to every value.
         if [[ -n "${DG_TRUST_BASE}" ]]; then
           validate_path "trust-base" "${DG_TRUST_BASE}"
-          if [[ "${DG_TRUST_BASE}" == -* ]]; then
-            printf '::error::dep-guard: `trust-base` must not begin with a dash: %q\n' "${DG_TRUST_BASE}"
-            exit 1
+        fi
+
+    # THE SCANNER COMES FROM OUTSIDE THE TREE IT SCANS. Running dep-guard with
+    # `npx` from inside the checkout put the whole choice of program inside the
+    # tree under judgment, by two separate routes. A `.npmrc` committed by the
+    # head repoints the registry npx fetches from. A
+    # `node_modules/@vaultcompass/dep-guard` already present in the head, from
+    # the workflow's own earlier install step, is what npx runs, with the
+    # version pin acting only as a satisfaction check on a package the head
+    # wrote. Now the package is installed from the registry at the version
+    # pinned in the caller's workflow file, under a prefix in the runner temp,
+    # and invoked from there by absolute path.
+    #
+    # WHAT THAT PIN DOES AND DOES NOT PROTECT. It takes the choice of program
+    # out of the tree: the head's lockfile, manifest, node_modules and .npmrc no
+    # longer decide what runs. It does not take that choice out of the workflow
+    # file. On a pull_request event GitHub runs the workflow as it is in the
+    # pull request's merge commit, so a pull request that edits the workflow can
+    # change this pin, or delete the step outright, the same as it could rewrite
+    # any other CI step; only pull_request_target runs the base branch's copy,
+    # and that event carries the base's secrets and is the wrong one for judging
+    # untrusted code. The control for a workflow edit is branch protection on
+    # the base branch, with review required for the workflow path, and nothing
+    # this action does can substitute for it. The boundary here is against the
+    # TREE choosing its own judge.
+    #
+    # IT RUNS OUTSIDE THE CHECKOUT TOO, not just installs outside it. A
+    # composite step with no working-directory runs at the workspace root, which
+    # is the head's own tree: npm would then be started with the pull request's
+    # .npmrc, package.json and lockfile under its cwd. In global mode npm does
+    # not read a project's own configuration, so nothing here is known to depend
+    # on that, and that is exactly why the step should not rest on it: the
+    # reason it is safe would be a property of a version of npm rather than of
+    # this file. Running from the runner temp costs nothing and takes the
+    # question away.
+    - name: Install dep-guard outside the workspace
+      id: install
+      shell: bash
+      working-directory: ${{ runner.temp }}
+      env:
+        # Under the runner temp, which is outside the workspace and is cleaned
+        # up by the runner. npm reads this variable itself, so nothing here has
+        # to pass --prefix on a command line.
+        npm_config_prefix: ${{ runner.temp }}/dep-guard-action
+        DG_VERSION: ${{ inputs.version }}
+      run: |
+        set -eu
+        mkdir -p "${npm_config_prefix}"
+
+        # THE VERIFICATION BELOW NEEDS npm 10.5.2 OR NEWER, AND SAYS SOMETHING
+        # ALARMING AND FALSE ON AN OLDER ONE.
+        #
+        # `npm audit signatures` is not version-stable. Below 10.5.2 it fails
+        # on a CLEAN, untampered install of these very packages, because the
+        # client's bundled keys and TUF root are stale rather than because
+        # anything is wrong. On 10.5.0 it reports "Someone might have tampered
+        # with these packages since they were published on the registry!",
+        # naming ours. On 10.2.4 it is EEXPIREDSIGNATUREKEY.
+        #
+        # Bisected against a real install with a COLD CACHE AND A FRESH HOME,
+        # so no newer client could have primed the TUF root or the key set:
+        # 8.19.4, 9.9.4, 10.2.4, 10.5.0 and 10.5.1 fail; 10.5.2 and every later
+        # version pass, with 10.5.2 verifying the same package and attestation
+        # counts as current npm rather than a reduced set.
+        #
+        # THE FLOOR SHIPPED AS 10.6.0 IN v0.6.2 AND WAS WRONG. That number came
+        # from a bisection that tested 10.5.0 and then 10.6.0 and never tested
+        # what lay between them. NODE 20.13.0 AND 20.13.1 SHIP npm 10.5.2, so
+        # v0.6.2 hard-refuses those consumers with a message telling them their
+        # client cannot do something it demonstrably can.
+        #
+        # THE SETUP-NODE STEP ABOVE IS NOT SUFFICIENT. `node-version: '22'` is
+        # a major-only spec and NODE 22.0.0 SHIPS npm 10.5.1, inside the
+        # failing band. `setup-node` satisfies a major from the runner's tool
+        # cache when it can, so a self-hosted or custom-image runner holding
+        # 22.0.0 gets a client this verification cannot use. An earlier version
+        # of this branch left the floor out on the grounds that the step above
+        # covered it; it does not, and nothing here would have caught that step
+        # being lowered or removed.
+        #
+        # Pulled out as the first version-shaped token rather than validated
+        # and then split. A shape check with `grep -Eq` matches PER LINE while
+        # the arithmetic reads the WHOLE string, so a client printing an
+        # upgrade notice above its version passed the check and then failed the
+        # comparison, leaving the floor skipped. `|| true` because grep exits 1
+        # on no match under `set -e`; output with no version in it yields the
+        # empty string and is refused.
+        NPM_VERSION="$(npm --version 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+        if [ -z "${NPM_VERSION}" ]; then
+          printf '::error::dep-guard: could not read an npm version to check. Refusing rather than assuming the client can verify signatures.\n'
+          exit 1
+        fi
+        NPM_MAJOR="${NPM_VERSION%%.*}"
+        NPM_REST="${NPM_VERSION#*.}"
+        NPM_MINOR="${NPM_REST%%.*}"
+        NPM_PATCH="${NPM_REST#*.}"
+
+        # WRITTEN AS "ACCEPT ONLY IF PROVABLY OK", NOT "REFUSE IF BAD".
+        #
+        # `[` returns 2 on a malformed comparison, and an `if` reads 2 as
+        # false. A refuse-if-bad shape therefore turns any arithmetic error
+        # into permission to proceed, which is precisely how the first two
+        # versions of this guard failed open. Here an error leaves NPM_OK at 0
+        # and the step refuses, so the direction of failure is closed by
+        # construction rather than by getting an expression right.
+        NPM_OK=0
+        if [ "${NPM_MAJOR}" -gt 10 ] 2>/dev/null; then
+          NPM_OK=1
+        elif [ "${NPM_MAJOR}" -eq 10 ] 2>/dev/null; then
+          if [ "${NPM_MINOR}" -gt 5 ] 2>/dev/null; then
+            NPM_OK=1
+          elif [ "${NPM_MINOR}" -eq 5 ] 2>/dev/null && [ "${NPM_PATCH}" -ge 2 ] 2>/dev/null; then
+            NPM_OK=1
           fi
         fi
+
+        if [ "${NPM_OK}" -ne 1 ]; then
+          printf '::error::dep-guard: npm %s cannot verify package signatures. This action needs npm 10.5.2 or newer; below that npm reports valid packages as tampered with, because its own bundled keys are stale.\n' "${NPM_VERSION}"
+          printf '::error::Pin a Node release carrying a newer npm. Node 20.13.0 and later, and 22.1.0 and later, are fine; 22.0.0 ships npm 10.5.1 and is not. Or pin vaultcompasshq/dep-guard@v0.6.1, which does not verify.\n'
+          exit 1
+        fi
+
+        # `--ignore-scripts`, because this step runs on a runner holding the
+        # job's token and the thing being installed is a CONTROL INPUT: it
+        # decides whether a pull request may merge. Without the flag, every
+        # package in the resolved tree gets arbitrary code execution here on
+        # every run, which is a strange amount of trust to extend from the tool
+        # whose job is deciding whether this repository can be trusted.
+        npm install -g --ignore-scripts "@vaultcompass/dep-guard@${DG_VERSION}"
+
+        # A ROOT MANIFEST, WITHOUT WHICH THE NEXT COMMAND SKIPS THE ONE PACKAGE
+        # IT EXISTS TO CHECK.
+        #
+        # `npm audit signatures` audits the tree's EDGES OUT: it loads the
+        # local prefix and walks what the root declares as dependencies. A
+        # global install leaves `<prefix>/lib` holding a `node_modules` and NO
+        # manifest, so the root declares nothing and the package just installed
+        # is on the far end of no edge. Its transitive dependencies are, so
+        # they get audited and the scanner itself does not.
+        #
+        # Measured in the sibling repositories, where the gap is always exactly
+        # the packages the check exists for: vault-guard 13 installed and 12
+        # audited without this file, conductor 36 and 32. vault-guard shipped
+        # that bug once and recorded the short count as evidence the check
+        # worked; this file has the manifest from the start.
+        printf '{"name":"dep-guard-action-verify","private":true,"dependencies":{"@vaultcompass/dep-guard":"%s"}}\n' \
+          "${DG_VERSION}" > "${npm_config_prefix}/lib/package.json"
+
+        # WHAT THIS COMMAND PROVES, narrowly, because the tempting summary is
+        # false. It asks the registry for each name and version in the tree and
+        # checks the registry signature served back.
+        #
+        # It does NOT read the installed files: the manifest is refetched
+        # rather than anything on disk being hashed, so a tampered install is
+        # invisible to it. It does NOT defeat a compromised registry, which
+        # signs what it serves. And a MISSING attestation is not a failure,
+        # only a missing or invalid signature is, so it does not require
+        # provenance despite this package publishing it.
+        #
+        # What remains is worth having: every name and version in the tree, the
+        # scanner included, has to be one npmjs currently serves with a valid
+        # registry signature.
+        #
+        # Fails closed under `set -eu`, deliberately. KNOWN CONSEQUENCE: a
+        # consumer whose runner points npm at a mirror or proxy that does not
+        # serve `/-/npm/v1/keys` installs fine and then fails here with
+        # EMISSINGSIGNATUREKEY, and a sigstore or TUF outage does the same to
+        # everyone at once. Documented rather than left to be discovered from a
+        # red required check.
+        #
+        # In a subshell so nothing after this line inherits the verification
+        # directory as its cwd. A failing subshell still trips `set -e`.
+        ( cd "${npm_config_prefix}/lib" && npm audit signatures )
 
     - name: Run dep-guard
       id: run
       shell: bash
+      working-directory: ${{ runner.temp }}
       env:
-        DG_VERSION: ${{ inputs.version }}
+        # The binary the install step just wrote, by absolute path rather than
+        # by name. A bare name would be resolved against PATH, and a workflow
+        # that put its own node_modules/.bin on PATH before this action would
+        # hand the head's copy back the resolution the install step took away.
+        #
+        # WHAT THIS DOES NOT BUY. The shim it points at starts with
+        # `#!/usr/bin/env node`, so the INTERPRETER is still a PATH lookup. A
+        # workflow that adds the checkout's node_modules/.bin to GITHUB_PATH,
+        # together with a head that declares a dependency whose `bin` map
+        # contains `node`, still chooses the interpreter. That needs the
+        # workflow's cooperation, which puts it in the same class as a pull
+        # request editing the workflow file, declared out of scope above -- but
+        # the absolute path is not a complete answer on its own and should not
+        # be read as one.
+        #
+        # THE LAYOUT ASSUMED HERE IS THE LINUX AND MACOS ONE, where a global
+        # install puts its shims in <prefix>/bin. On Windows npm puts them in
+        # the prefix directory itself, and this path would not exist.
+        DG_BIN: ${{ runner.temp }}/dep-guard-action/bin/dep-guard
         DG_PATH: ${{ inputs.path }}
         DG_ONLINE: ${{ inputs.online }}
         DG_FAIL_ON: ${{ inputs.fail-on }}
@@ -256,9 +674,51 @@ runs:
 
         ROOT="${GITHUB_WORKSPACE}"
         OUT="${ROOT}/${DG_SARIF_OUTPUT}"
+        RESULTS_FILE=""
+
+        # A symlink is not covered by the `..` and leading-slash rules, which
+        # constrain the STRING. The head controls the default filename and
+        # every directory on the way to it, so it can commit a symlink
+        # anywhere along that path pointing outside the workspace, and the
+        # redirect below would follow it. That cannot change this run's verdict
+        # -- the scan has not happened yet and the SARIF is written after it --
+        # but it can clobber a file a later step in the caller's workflow reads.
+        #
+        # EVERY COMPONENT, not just the leaf and its parent. The first version
+        # of this guard checked `${OUT}` and `dirname ${OUT}`, which a review
+        # walked past with one more level of nesting: a `reports` symlink and a
+        # `reports/sub/out.sarif` target wrote outside the workspace with the
+        # step exiting 0.
+        #
+        # BEFORE `mkdir -p`, not after. The first version ran the check second,
+        # so a refused run had already created directories through the
+        # attacker's symlink on its way to refusing.
+        CURSOR="${OUT}"
+        while [[ "${CURSOR}" != "${ROOT}" && "${CURSOR}" != "/" ]]; do
+          if [[ -L "${CURSOR}" ]]; then
+            printf '::error::dep-guard: `sarif-output` resolves through a symlink at %q, which would write outside the path it names: %q\n' "${CURSOR}" "${DG_SARIF_OUTPUT}"
+            printf '::error::Remove the symlink from the repository, or point sarif-output somewhere else.\n'
+            exit 1
+          fi
+          CURSOR="$(dirname "${CURSOR}")"
+        done
+
         mkdir -p "$(dirname "${OUT}")"
 
-        ARGS=(scan "${DG_PATH}" --format sarif)
+        # ABSOLUTE, built from the workspace. This step runs from the runner
+        # temp rather than from the checkout, so a relative scan path would
+        # resolve against the wrong directory. dep-guard resolves the scan
+        # path and then hands it to git as its cwd, so an absolute one works
+        # everywhere the relative one did.
+        #
+        # THIS IS NOT COSMETIC, and it is not separable from the move above.
+        # Run from the runner temp with a relative `.`, dep-guard resolves the
+        # runner temp as the repository, fails to resolve the trust base, and
+        # exits 2 on EVERY run -- with a message telling the caller to fetch
+        # the base branch with fetch-depth: 0, which they already did. A
+        # permanently red required check, explained by advice that cannot fix
+        # it. The two halves ship together or not at all.
+        ARGS=(scan "${ROOT}/${DG_PATH}" --format sarif)
         if [[ "${DG_ONLINE}" == "true" ]]; then
           ARGS+=(--online)
         else
@@ -296,17 +756,26 @@ runs:
 
         # SARIF goes to stdout and nothing else does, so this redirects
         # rather than tees: a `tee` of a text banner into a SARIF file is
-        # how a sibling action in this family broke its own upload. There
-        # is no `--` between the package spec and `scan` for the same
-        # family reason: npx forwards it into argv, and commander then
-        # treats it as end-of-options and ignores --format.
-        cd "${ROOT}"
+        # how a sibling action in this family broke its own upload.
         set +e
-        npx --yes "@vaultcompass/dep-guard@${DG_VERSION}" "${ARGS[@]}" > "${OUT}"
+        "${DG_BIN}" "${ARGS[@]}" > "${OUT}"
         SCAN_STATUS=$?
         set -e
 
-        echo "results_file=${OUT}" >> "${GITHUB_OUTPUT}"
+        # Published only when there is something in it. dep-guard exits before
+        # writing any SARIF when it could not run at all -- an unresolvable
+        # trust base, a missing corpus -- and the redirect has already created
+        # the target by then, so the file exists and is zero bytes. Handing
+        # that path to upload-sarif fails the job with a SARIF parse error,
+        # which buries the real cause under a complaint about the upload: the
+        # exact confusion the guard on this step's output was added to prevent.
+        if [[ -s "${OUT}" ]]; then
+          RESULTS_FILE="${OUT}"
+        else
+          printf 'dep-guard: no SARIF was written to %s (the scan exited %s first), so there is nothing to upload.\n' "${OUT}" "${SCAN_STATUS}"
+        fi
+
+        echo "results_file=${RESULTS_FILE}" >> "${GITHUB_OUTPUT}"
         echo "exit_code=${SCAN_STATUS}" >> "${GITHUB_OUTPUT}"
 
         # Deliberately exits 0 here, whatever dep-guard said. The upload
@@ -348,16 +817,29 @@ runs:
         # as a bad argument and which would then exit 1 for a reason that
         # has nothing to do with the scan.
         if [[ -z "${DG_EXIT_CODE}" ]]; then
-          printf '::error::dep-guard did not run to completion, so no result was recorded. See the earlier steps.\n'
-          exit 1
+          printf '::error::dep-guard did not run to completion, so no result was recorded and there are no findings either way. An input failed validation, or a step died before the scan ran. See the earlier steps.\n'
+          exit 2
         fi
-        if [[ "${DG_EXIT_CODE}" == "0" ]]; then
-          echo "dep-guard: no blocking findings."
-          exit 0
-        fi
-        if [[ "${DG_EXIT_CODE}" == "2" ]]; then
-          printf '::error::dep-guard could not complete its checks (exit 2). This is not a clean scan.\n'
-        else
-          printf '::error::dep-guard found blocking findings (exit %s).\n' "${DG_EXIT_CODE}"
-        fi
-        exit "${DG_EXIT_CODE}"
+
+        # Only 0 and 1 are verdicts. Everything else, including the codes the
+        # SHELL produces when the binary is missing or not executable, is
+        # could-not-run and is re-raised as 2, so a required check still fails
+        # and the message says why rather than claiming findings nobody found.
+        case "${DG_EXIT_CODE}" in
+          0)
+            echo "dep-guard: no blocking findings."
+            exit 0
+            ;;
+          1)
+            printf '::error::dep-guard found blocking findings (exit 1).\n'
+            exit 1
+            ;;
+          2)
+            printf '::error::dep-guard could not complete its checks (exit 2): an unresolvable trust base, a missing corpus, or a scan path that is not a repository. This is not a clean scan.\n'
+            exit 2
+            ;;
+          *)
+            printf '::error::dep-guard did not produce a result: the run step exited %s, which is not one of the three codes dep-guard itself uses. npm or the dep-guard binary failed to run, so nothing scanned this change. Reported as could not run.\n' "${DG_EXIT_CODE}"
+            exit 2
+            ;;
+        esac

@@ -49,7 +49,8 @@ jobs:
   # The guardrail gates, run through the conductor umbrella at the ci stage.
   # A job of its own rather than steps inside ci: it needs
   # security-events: write to upload a SARIF log, and the test job has no
-  # business carrying that permission. It is not a required check. It reports.
+  # business carrying that permission. It is a required check on main, which
+  # is why the trailer guard below lives here.
   guardrails:
     runs-on: ubuntu-latest
 
@@ -58,6 +59,34 @@ jobs:
       security-events: write
 
     steps:
+    - name: Refuse pull requests with bot co-author trailers
+      if: github.event_name == 'pull_request'
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        pattern='^Co-authored-by:.*(cursoragent@cursor\.com|noreply@anthropic\.com|\[bot\])'
+        commits_json="$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/commits" | jq -s 'add')"
+        count="$(echo "$commits_json" | jq 'length')"
+        failures=0
+        while IFS= read -r commit; do
+          sha="$(echo "$commit" | jq -r '.sha')"
+          message="$(echo "$commit" | jq -r '.commit.message')"
+          trailer="$(printf '%s\n' "$message" | grep -iE "$pattern" || true)"
+          if [ -n "$trailer" ]; then
+            echo "Offending commit: $sha"
+            echo "Trailer: $trailer"
+            echo "Co-author trailers from editor agents put a bot account in the contributors graph; remove the trailer with git commit --amend and re-push."
+            failures=1
+          fi
+        done < <(echo "$commits_json" | jq -c '.[]')
+        if [ "$failures" -eq 1 ]; then
+          exit 1
+        fi
+        echo "Checked $count commit(s) for bot co-author trailers; none found."
+
     - name: Checkout code
       uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:

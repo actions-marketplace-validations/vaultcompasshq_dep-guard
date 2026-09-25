@@ -979,6 +979,9 @@ The codes, and what each one means:
   the known order. Unreachable today; it exists so that the day it becomes
   reachable, the scan stops instead of scoring the finding below every
   threshold and passing it.
+- `manifests-unresolved` -- a resolve found zero manifests while a manifest
+  exists on disk under the scan root: a misrooted or vacuous scan, not a
+  dependency-free repository. Exits 2 (could-not-run), never a clean pass.
 
 Online checks are the one deliberate exception to failing closed: a network
 problem degrades to the offline result with a diagnostic, and never blocks.
@@ -1371,9 +1374,12 @@ this project actually publishes.
 
 `packages/core` and `packages/cli` always move to a new version together,
 even when only one of them changed. `.github/workflows/release.yml`
-asserts this before publish (see its "Assert core and cli versions match
-each other, and the tag if there is one" step) and refuses to continue if
-they disagree.
+asserts this before publish (see its "Decide the release kind, and refuse a
+tag that is neither" step, which calls `scripts/classify-release-tag.mjs`)
+and refuses to continue if they disagree. The lockstep check is the first
+thing that script does, before it even looks at the tag, so a lockstep break
+reports as a lockstep break rather than as a tag mismatch -- and it runs on
+both kinds of release, an action-only tag included.
 
 The reason is `pnpm`'s own publish behavior, not caution for its own
 sake: `packages/cli/package.json` depends on core via `workspace:*`, and
@@ -1836,3 +1842,396 @@ tarball-repointed, and the rest of the list in the `delta-new-lock-entries`
 diagnostic) never evaluate. Pre-existing in 0.5.0 and not introduced by
 pull-request mode; recorded here because the trust-boundary work is what
 made the gap legible.
+
+## The scanner is itself a control input, and comes from outside the tree
+
+The section above draws the line between a SUBJECT and a CONTROL INPUT and
+then lists the control inputs as files. That list was incomplete, and the
+missing entry is the largest one: **the program doing the scanning**. A gate
+that reads its config from the base branch and then runs a binary the head
+chose has moved the decision, not removed it.
+
+The Action used to run `npx --yes "@vaultcompass/dep-guard@${DG_VERSION}"`
+with the checkout as its working directory. Two routes followed from that.
+Both were exercised against real npm during the investigation, and **the
+harness now pins the two attacks' outcomes**: `bench/action-install.mjs` runs
+action.yml's own install and run steps against real npm and two local,
+ephemeral-port registries (no network),
+once for this worktree's current `action.yml` and once for the pre-fix
+`action.yml` read out of the `v0.6.0` tag, across three checkout shapes -- a
+committed `.npmrc` alone, the scoped-key variant, and a planted `node_modules`
+copy alongside it. The recorded result is `bench/baseline.action-install.json`;
+`pnpm bench:action-install` compares a fresh run against it and exits non-zero
+on any drift, and `pnpm bench:action-install:update-baseline` re-records it.
+The v0.6.0 cases are the negative control: if they ever stop showing the
+attack, the harness has stopped being able to see the thing it exists to
+watch for, and `--compare` fails on that as loudly as on a regression in the
+current action. The two routes it pins:
+
+- **A committed `.npmrc` repoints the registry.** npx in non-global mode
+  reads project config from its cwd, and `--yes` means no prompt. A pull
+  request adding one root file chooses which registry the scanner is
+  fetched from. Note that `.npmrc` was already on the control-input list
+  for its scope pins; this is a second, sharper reason it belongs there.
+- **An installed copy wins outright.** `npx pkg@version` run in a tree whose
+  `node_modules` already satisfies that spec runs the local copy and never
+  contacts the registry. The version pin degrades from a choice of program
+  to a satisfaction check on a package the head wrote, and any workflow with
+  an install step before the gate hands that over.
+
+**The rule: install the scanner from the registry into a prefix under the
+runner temp, start npm from the runner temp, and call the result by absolute
+path.** Not "install outside and run wherever": a composite step with no
+`working-directory` runs at the workspace root, so npm would still start
+with the head's `.npmrc`, manifest and lockfile under its cwd. Global mode
+is documented not to read project config, which is a property of a version
+of npm rather than of this repository, and is not what the boundary should
+rest on.
+
+**The install also refuses to run the tree's scripts, and verifies what
+arrived.** Two more properties of the same step, both following from the
+scanner being a control input rather than an ordinary dependency.
+
+`--ignore-scripts`, because the step runs on a runner holding the job's token.
+Without it every package in the resolved tree gets arbitrary code execution
+there on every run.
+
+A ROOT MANIFEST under `<prefix>/lib`, and it is load-bearing. `npm audit
+signatures` audits the tree's EDGES OUT, and a global install leaves that
+directory with a `node_modules` and no manifest, so the root declares nothing
+and the package just installed is on the far end of no edge. Without it the
+audit covers the dependencies and SKIPS THE SCANNER, the one package it exists
+for. Measured in the sibling repositories, where the gap is always exactly the
+packages under check: vault-guard 13 installed and 12 audited without the file,
+conductor 36 and 32. vault-guard shipped that bug once and recorded the short
+count as evidence the check worked; this repository has the manifest from the
+start.
+
+WHAT THE VERIFICATION PROVES, narrowly, because the obvious summary is wrong.
+It asks the registry for each name and version in the tree and checks the
+signature served back. It does NOT read the installed files, so a tampered
+install is invisible to it. It does NOT defeat a compromised registry, which
+signs what it serves. And a MISSING attestation is not a failure, only a
+missing or invalid signature is, so it does not require provenance despite this
+package publishing it. What remains is that every name and version in the tree,
+the scanner included, has to be one npmjs currently serves with a valid
+signature.
+
+KNOWN CONSEQUENCE OF FAILING CLOSED: a runner pointed at a mirror or proxy that
+does not serve `/-/npm/v1/keys`, or a sigstore outage, installs fine and then
+fails this step with `EMISSINGSIGNATUREKEY`.
+
+**Enforced by:** the install cases in `scripts/tests/action-run-script.test.mjs`
+(the argv carries the flag, the manifest names the version being installed, and
+the audit is recorded). The stub is npm, so those prove the action ASKS; the
+counts above are what a real npm does.
+
+The install step's own `working-directory` line is DEFENCE IN DEPTH that
+`bench/action-install.mjs` cannot observe directly, and that is worth stating
+plainly rather than leaving a gap the harness's own coverage would seem to
+close. `npm install -g` ignores project-level config regardless of its cwd,
+so real npm behaves identically whether that step's `working-directory`
+points at the runner temp or at the workspace root -- the real-npm harness has
+nothing to compare, because there is no observable difference for it to
+catch. It is the STUBBED suite, `scripts/tests/action-run-script.test.mjs`
+("starts npm outside the checkout, so a committed `.npmrc` is never its cwd"),
+whose stub records its own cwd and pins this particular line. The two suites
+divide the claim rather than duplicate it: the stub proves where npm is told
+to start; the real-npm harness proves what real npm does once it is asked to
+run.
+
+**The scan path passed to that binary must be ABSOLUTE, and the two halves
+are inseparable.** Run from the runner temp with a relative `.`, dep-guard
+resolves the runner temp as the repository, fails to resolve the trust base,
+and exits 2 on every run, with a message telling the caller to fetch the
+base branch with `fetch-depth: 0`, which they already did. A permanently red
+required check explained by advice that cannot fix it. Ship both or neither.
+
+**The version input takes an exact version only**, and defaults to the
+SCANNER version the action tag shipped with, which is a different number from
+the tag whenever an action-only release happens. A dist-tag hands the choice
+of program to the registry on the morning of the run. A charset check is not
+enough on its own: npm's specifier parser reads a value beginning with `.` or
+ending in `.tgz` as a local path, so `.`, `..` and `payload.tgz` resolve
+against a directory instead of the registry, and a value that is not valid
+semver at all, such as `01.2.3` or `0.6.00`, falls back to being treated as a
+dist-tag.
+
+## On a pull request, `version` may not pin BACKWARD
+
+The shape check above is a check on the FORM of the input and is not the
+control for version choice: it admits every published version. On a same-repo
+`pull_request` event GitHub runs the workflow file from the HEAD, so `version:`
+is written by the pull request being judged. Once a second scanner version
+exists, that is a bypass with an innocent shape: deleting a security step reads
+as deleting a security step, while `version: 0.7.0` reads as version
+management. Ten scanners are published, 0.1.0 through 0.7.0, so the shape
+check admits nine versions below the tag scanner. What stops those today is
+not the shape check but a FLAG: `--trust-base` arrived in 0.6.0, the run step
+appends it on every pull-request run with no opt-out, and a scanner at or below
+0.5.0 answers `error: unknown option '--trust-base'`. A backward pin therefore
+already fails the job today, at the scan rather than at validate, with a
+message about an unknown option instead of about the pin. This rule moves the
+failure to the validate step and names the cause.
+
+So on a pull-request event the step refuses a version BELOW the scanner this
+action tag ships, and accepts anything at or above it. Pinning FORWARD stays
+allowed, which is the direction the input exists for. That rests on an
+ASSUMPTION the rule does not enforce: that a newer scanner is at least as
+strict. Nothing bounds a forward pin, so a version ahead of the tag scanner is
+accepted whatever its rules turn out to be.
+
+Four properties, each load-bearing:
+
+- `DG_TAG_SCANNER_*` is a constant of its own. It is not the npm floor in the
+  install step, which is a property of the npm CLIENT and says nothing about
+  the scanner, and it is not derived from the input. This repository declares
+  no flag-compatibility floor on the scanner, unlike vault-guard, where the two
+  constants sit next to each other and mean different things; it does have an
+  undeclared one, because the run step passes `--trust-base` on every
+  pull-request run and no scanner below 0.6.0 knows that flag, which puts a de
+  facto floor at 0.6.0 on exactly the event this rule governs. Here the tag
+  scanner is the only scanner-version constant in the file, so the check
+  follows the version shape check directly.
+- The comparison is against that hardcoded constant, never against anything
+  derived from an input. `inputs.version` looks identical whether a consumer
+  pinned the current version or the default supplied it, so the step cannot
+  tell a pin from a default; the constant is the only source of truth. It is
+  trustworthy because `action.yml` comes from the ref the consumer's workflow
+  names, not from the pull request's tree. That holds when the consumer names
+  this action by owner and ref; a LOCAL-PATH reference, the `./some/dir` form,
+  reads `action.yml` out of the pull request's own tree, so the constant is
+  author-controlled there and this rule protects nothing.
+- The event test is `GITHUB_BASE_REF` being non-empty, the same one the run
+  step uses to decide whether to pass `--trust-base` under `auto`, rather than
+  a second detector to keep in step. It rests on a PLATFORM GUARANTEE worth
+  recording, because a same-repo pull request's author writes the workflow file
+  and the obvious bypass is therefore `env: GITHUB_BASE_REF: ""` at job level.
+  Quote the page at the strength it actually claims: "You can't overwrite the
+  value of the default environment variables named GITHUB_* and RUNNER_*." That
+  line is stated flatly, with no hedge attached to it. The hedge on the same
+  page ("However, it's not guaranteed that this will always be possible")
+  qualifies a different rule, the CI variable exception, not the GITHUB_*/
+  RUNNER_* no-overwrite rule this invariant relies on. So the guarantee relied
+  on here is a documented platform promise, not a hedged one. The same page
+  confirms the other half relied on here, that `GITHUB_BASE_REF` is set only on
+  `pull_request` and `pull_request_target` events
+  (https://docs.github.com/en/actions/reference/workflows-and-actions/variables).
+  The Validate inputs step also DECLARES `GITHUB_BASE_REF: ${{ github.base_ref }}`
+  in its own `env:` mapping, the same spelling the run step uses. A step-level
+  entry wins over a job-level one, and `github.base_ref` is read out of the
+  event payload rather than out of anything a workflow author writes, so the
+  value cannot come from the workflow file either way. The declared form is
+  defense in depth and is stronger than a bare read of the runner default,
+  because its value comes from the event payload rather than from anything a
+  workflow author can write, but it is not absolute immunity: a job-level
+  `env: BASH_ENV: <a file>` that runs `unset GITHUB_BASE_REF` would still
+  defeat it, because BASH_ENV is sourced before the step script runs and is
+  not itself one of the GITHUB_*/RUNNER_* variables the no-overwrite guarantee
+  covers. The platform guarantee above remains a second, separate line of
+  defence, and neither form is depended on as the sole control.
+- Written accept-only-if, not refuse-if, for the same reason as the npm floor:
+  `[` returns 2 on a malformed comparison and an `if` reads 2 as false, so a
+  refuse-if shape turns an arithmetic error into permission. The comparison is
+  component by component and never textual, because `0.10.0` sorts below
+  `0.7.0` as a string and above it as a version, so a lexicographic check would
+  refuse the forward pin this rule deliberately leaves open.
+
+**What this does NOT cover, stated because the obvious summary is wider than
+the rule.** It closes pinning backward on a SAME-REPO pull request, and nothing
+else.
+
+- Not forks, and on forks the rule costs something rather than merely doing
+  nothing. A fork's `pull_request` run uses the BASE repository's workflow
+  file, so a fork author never writes the `version:` that judges them and there
+  is no hole there to close. But `GITHUB_BASE_REF` IS set on a fork pull
+  request, so the check fires anyway and judges the base repository's own
+  trusted workflow file. A maintainer's deliberate backward pin in that base
+  workflow fails EVERY fork pull-request run: a pure false refusal, on a pin
+  nobody untrusted wrote. The remedy is the same as for
+  any consumer, which is to remove the `version:` input.
+- Not a pull request that deletes the step, moves the `uses:` pin to an older
+  action tag, or edits the job away. Those are workflow-file edits, and the
+  control is branch protection with required review on `.github/workflows/**`.
+  Nothing in `action.yml` can substitute for it.
+- Not push events. The rule fires exactly where `GITHUB_BASE_REF` is set, which
+  is `pull_request` and `pull_request_target`; push runs are out of scope. Read
+  that as scope, not as safety: a push to an UNPROTECTED feature branch runs
+  that branch's own workflow file, written by the same author, with
+  `GITHUB_BASE_REF` empty, so it is as author-controlled as a pull request and
+  the rule does not cover it.
+- It is not free today. Ten scanners are published, so a consumer pinning any
+  of 0.1.0 through 0.6.0 passes the shape check on a pull request now and is
+  refused, with a message telling them to remove the input or raise it. A pin
+  below 0.6.0 is already broken on that event, because no scanner below 0.6.0
+  knows `--trust-base` and the run step always passes it; the rule changes
+  that failure from the scan to a named refusal at validate. A pin of exactly
+  0.6.0 newly fails here too, on version alone, since it knows `--trust-base`
+  and would otherwise run cleanly. Pins at or above 0.7.0 are unaffected.
+
+**Enforced by:** the `pinning the scanner backward on a pull request` cases in
+`scripts/tests/action-run-script.test.mjs`. One case drives the SHIPPED,
+unmodified step with `version: 0.5.9` and `GITHUB_BASE_REF` set, and asserts
+the refusal names both 0.5.9 and 0.7.0, with the same input accepted when
+`GITHUB_BASE_REF` is unset: the rule is observable on the real file, because
+nine published versions sit below the tag scanner. The cases that need a
+version below a FUTURE tag scanner, to exercise the comparison as it will
+behave once a second scanner in the 0.7.0-or-newer family ships, drive the real
+step text with the tag-scanner constant advanced one minor version and assert
+the replacement matched, so deleting the constant turns them red. Plus a drift
+case tying `DG_TAG_SCANNER_*`, the `version` input's default and both
+`packages/*/package.json` versions to one number, reading the default with
+`readActionVersionDefault` from `scripts/lib/release-kind.mjs` rather than by
+position, so inserting an input above `path:` cannot satisfy it; a text guard
+asserting the shape check's pattern and the re-match's are byte-identical,
+which is what makes the re-match's "internal error" branch unreachable rather
+than merely unreached; a case proving the shape check answers first for a value
+that is not a version at all, so `latest` is told it is a dist-tag rather than
+lectured about pull requests; and an ordering case bounding the
+`GITHUB_BASE_REF` gate between the shape check and the flag initialisation, at
+both ends. The lower bound is what the assertion needs, because an unbounded
+search finds the run step's own copy of the same idiom; the upper bound is kept
+so that a future SECOND use of the variable inside the validate step, below the
+flag initialisation, could not satisfy the assertion in a deleted gate's place.
+Deleting the gate turns the case red today.
+
+## The action tag and the scanner version are two numbers, and both get bumped
+
+0.6.1 was the first release where they came apart, and the release commit that
+created the split broke this rule inside itself: the README's copy-paste
+example still said `@v0.6.0` while the prose ten lines below told the reader
+to move to `@v0.6.1`. The one block anybody actually copies was the one
+handing them the pre-fix action. A reviewer caught it.
+
+**The rule: when either number moves, grep for BOTH.** The places that carry
+one or the other, as of 0.6.1:
+
+- `action.yml`, the `version` input's `default:` (the scanner version)
+- `action.yml`, the `DG_TAG_SCANNER_*` constants in the Validate inputs step
+  (the scanner version). Added in 0.6.4 with the pull-request pin rule above.
+  A constant left BEHIND a published scanner is the dangerous direction: it
+  goes on admitting the very pin it exists to refuse, and it does it quietly.
+  `scripts/tests/action-run-script.test.mjs` ties it to the `default:` and to
+  both package versions, so this one cannot be forgotten in silence.
+- `action.yml`, the `version` input's description, which names an example
+- `README.md`, the `uses: vaultcompasshq/dep-guard@vX.Y.Z` example (the tag)
+- `README.md`, the prose about which scanner a tag installs (both numbers)
+- `CHANGELOG.md`, the release heading and any migration line naming a tag
+- `package.json` and each `packages/*/package.json` (the scanner version)
+- `bench/baseline.action-install.json`. Its top-level `scannerVersion` field
+  is NOT itself what `--compare` checks: `compareRuns` walks each recorded
+  case's `observed` object only, so a stale top-level value would sit there
+  uncompared and unnoticed. What actually catches a scanner bump is inside
+  the cases instead: the `current--*` cases' `installedScanner.version` (the
+  version npm actually installed), and the two negative-control cases that
+  reach the hostile registry (`npmrc-only` and `scoped-npmrc-only`, at the
+  `v0.6.0` revision) whose `evilRegistry.paths` still name the hostile
+  stand-in's tarball at its packed version -- the third negative-control
+  case, `npmrc-and-planted-copy`, never contacts a registry at all, so it
+  carries no version either way. `legitRegistry.paths` no longer carries the
+  version at all: it is recorded as package identities rather than tarball
+  filenames on purpose (see `bench/action-install.mjs`'s `packageNamePaths`),
+  so an ordinary commander or yaml bump stops failing the compare for a
+  reason unrelated to the scanner's own version. A scanner bump without a
+  `pnpm bench:action-install:update-baseline` still leaves this baseline out
+  of step with the number everywhere else on this list, and `--compare` still
+  catches it, just through these per-case fields rather than through the
+  field at the top of the file.
+
+**The release workflow now knows both shapes, and the tag has to earn the
+second one.** `.github/workflows/release.yml` used to assert that a pushed tag
+read `v` plus the package version and fail otherwise, so the v0.6.1 tag push
+went red before install, build or publish and got no Release page at all. Its
+version step now calls `scripts/classify-release-tag.mjs` instead.
+
+A tag equal to `v` plus the package version is a package release, and it
+publishes and tests exactly as it always has -- with one addition: the script
+reads `action.yml` on this path too, fails if it cannot read the `version`
+input's default, and refuses the release when that default is not the version
+being published. Publishing 0.7.0 under tag `v0.7.0` while the action that tag
+ships still installs 0.6.0 is the same split as an action-only release, in the
+one direction nobody chooses on purpose. That check is skipped when the package
+version carries a prerelease, since `action.yml` refuses a prerelease pin
+outright and no legal default could match it.
+
+Any other tag is treated as an action-only release ONLY if all five of these
+hold, and fails with a message naming the one that did not: the tag is `v` plus
+exact semver (no prerelease, no build suffix, no leading zeros, the same shape
+`action.yml` validates its `version` input against); it is strictly greater than
+the package version by numeric ordering, so `v0.9.0` against packages at 0.10.0
+is a mistake and not a forward move; `CHANGELOG.md` at the tagged commit carries
+a `## [X.Y.Z]` heading for the tag version, which is what separates a release
+somebody decided to make from a forgotten bump pushed as a tag, since every
+other condition here is satisfied by that mistake; both
+`@vaultcompass/dep-guard-core` and `@vaultcompass/dep-guard` are already on the
+npm registry at exactly the package version; and `action.yml`'s `version`
+default equals that same package version.
+
+On the action-only path the run still installs, builds, typechecks, lints and
+tests. It is tempting to skip those on the grounds that `ci.yml` already ran
+them, but this workflow never learns that: the ancestry check proves the tagged
+commit is an ANCESTOR of `main`, which every intermediate commit of a merged PR
+branch also is without ever having had a CI run of its own. And an action-only
+release's whole payload is `action.yml` plus docs, which is precisely what the
+public-hygiene lint and the action suites cover. What it skips is what exists to
+protect a publish that does not happen: the corpus walk and its checks, the
+packed-tarball install gate, the npm upgrade for OIDC trusted publishing, and
+the publish itself. It then cuts a Release whose body says nothing was
+published.
+
+The ancestry check -- the tagged commit must be on `main` -- applies to both
+kinds, because an action-only tag still moves the ref people run in `uses:`.
+Every workflow condition that reads the decision is spelled positively
+(`== 'false'` for the publish-side steps, `== 'true'` for the action-only
+Release body): an output that is empty or missing then skips publishing instead
+of running it, which `!= 'true'` would not. The registry lookup runs from a
+temp directory with an explicit `--registry`, so no `.npmrc` in THIS REPOSITORY
+can decide what "already published" means. That is the whole claim: a
+scope-specific line such as `@vaultcompass:registry=...` in a user-level or
+runner-level `.npmrc` still outranks `--registry`, and nothing here reaches
+that. The rules and the reasoning live in
+`scripts/lib/release-kind.mjs`; `scripts/tests/release-kind.test.mjs` covers
+them with the registry lookup injected, and also asserts the workflow's own
+wiring: which steps are gated, and the exact ordered list of every step from
+the decision step to the END of the release job, so a step inserted anywhere
+after the decision -- including after tag resolution, where a second publish
+would sit next to the Release that announces it -- fails the suite until
+somebody says which side of the gate it belongs on. The same file reads the
+real `action.yml` and the real `CHANGELOG.md`, so a moved default or a
+reformatted heading goes red in the pull request that does it rather than at
+tag time.
+
+Releases classify from a `packages[]` list in lockstep: every published
+package must carry the same version, checked before the tag is looked at
+(`scripts/lib/release-kind.mjs`). The CHANGELOG heading match is a literal
+`## [X.Y.Z]` prefix on a trimmed line, one space after `##`, never a regex
+built from the version. The canary in `scripts/tests/release-kind.test.mjs`
+("the real CHANGELOG.md") uses that same `trim().startsWith` check against
+the current package version, so a heading reformatted to two spaces after
+`##` goes red in the pull request that does it.
+
+They are allowed to differ, and an action-only release is the normal reason:
+nothing in the scanner changed, so publishing a new scanner purely to keep two
+strings matching would burn a version through a one-way trusted-publisher
+path. What is not allowed is a document telling a reader to pin one number
+while an example next to it pins the other.
+
+**What this does NOT cover**, and the comment in `action.yml` says so: a
+pull request can edit the workflow file, because a `pull_request` run uses
+the workflow as it is in the merge commit. Branch protection on the base
+branch with review required for `.github/workflows/**` is the control for
+that, and nothing the action does substitutes for it. The boundary here is
+against the TREE choosing its own judge, which is a smaller and achievable
+claim. The absolute binary path is likewise not total: the shim starts with
+`#!/usr/bin/env node`, so the interpreter is still a PATH lookup that a
+cooperating workflow can influence.
+
+**Testing this needs a harness that derives each step's environment and
+working directory from action.yml itself.** A harness with its own table of
+variables, or its own idea of the cwd, asserts a property of the harness: a
+review deleted the entire install step from a copy of `action.yml` and all
+25 tests passed, and removing `working-directory` from a step passed too.
+The suite now reads both from the file, and `DG_ACTION_FILE` points it at a
+mutated copy so any of this can be made to fail on demand. Both action test
+files honour that override; one of them not honouring it produced a green
+run against a weakened file.
